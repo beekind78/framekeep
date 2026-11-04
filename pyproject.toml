@@ -1,0 +1,12 @@
+[project]
+name = "framekeep"
+version = "1.13.0"
+description = "A private, local photo organizer for rediscovering old phone backups."
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"

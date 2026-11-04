@@ -1,0 +1,15 @@
+* text=auto
+*.py text eol=lf
+*.js text eol=lf
+*.css text eol=lf
+*.html text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.json text eol=lf
+framekeep/category_prompts.json -text whitespace=cr-at-eol
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.jpg binary
+*.ico binary
+*.ttf binary
+third_party/*.txt -whitespace

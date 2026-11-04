@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Framekeep · Your memories, back in order</title>
+  <link rel="icon" type="image/svg+xml" href="/static/icon.svg">
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/workspace.css">
+  <script src="/static/app.js" defer></script>
+  <script src="/static/context.js" defer></script>
+</head>
+<body>
+<svg class="sprite" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><defs>
+  <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></symbol>
+  <symbol id="i-calendar" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="16" rx="3"/><path d="M7 3v4m10-4v4M3 11h18m-13 4h1m6 0h1m-8 3h1"/></symbol>
+  <symbol id="i-people" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><path d="M3 21v-3a6 6 0 0 1 12 0v3m2-16a3 3 0 0 1 0 6m1 3a5 5 0 0 1 3 4v3"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="13" height="13" rx="3"/><path d="M16 8V6a3 3 0 0 0-3-3H6a3 3 0 0 0-3 3v7a3 3 0 0 0 3 3h2"/></symbol>
+  <symbol id="i-heart" viewBox="0 0 24 24"><path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1.1-1.1a5.5 5.5 0 0 0-7.8 7.8L12 21l8.8-8.6a5.5 5.5 0 0 0 0-7.8Z"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7V5a2 2 0 0 1 2-2h5l3 4h6a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"/><path d="M3 8h18"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="7"/><path d="m16 16 5 5"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6l8-3Z"/><path d="m8 12 3 3 5-6"/></symbol>
+  <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M4 12h16m-6-6 6 6-6 6"/></symbol>
+  <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M6 18 18 6"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+  <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M3 6h18M3 12h18M3 18h18"/><circle cx="8" cy="6" r="2"/><circle cx="16" cy="12" r="2"/><circle cx="8" cy="18" r="2"/></symbol>
+  <symbol id="i-photo" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8" cy="8" r="1.5"/><path d="m3 18 6-6 4 4 3-3 5 5"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 7a9 9 0 1 0 1 8M20 3v5h-5"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6m0-10v1"/></symbol>
+  <symbol id="i-spark" viewBox="0 0 24 24"><path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5L12 3Z"/></symbol>
+  <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></symbol>
+  <symbol id="i-grid-small" viewBox="0 0 24 24"><rect x="3" y="3" width="4" height="4" rx=".5"/><rect x="10" y="3" width="4" height="4" rx=".5"/><rect x="17" y="3" width="4" height="4" rx=".5"/><rect x="3" y="10" width="4" height="4" rx=".5"/><rect x="10" y="10" width="4" height="4" rx=".5"/><rect x="17" y="10" width="4" height="4" rx=".5"/><rect x="3" y="17" width="4" height="4" rx=".5"/><rect x="10" y="17" width="4" height="4" rx=".5"/><rect x="17" y="17" width="4" height="4" rx=".5"/></symbol>
+</defs></svg>
+<aside class="sidebar">
+  <a class="brand" href="/" aria-label="Framekeep home"><img src="/static/icon.svg" alt="" width="35" height="35"><span>framekeep<span class="brand-dot">.</span></span></a>
+  <div class="workspace-label">LIBRARY</div>
+  <nav aria-label="Main navigation">
+    <button class="nav-item active" data-view="albums"><svg><use href="#i-folder"/></svg>Albums</button>
+    <button class="nav-item" data-view="all"><svg><use href="#i-grid"/></svg>All media<span id="nav-total" class="nav-count">0</span></button>
+    <button class="nav-item" data-view="timeline"><svg><use href="#i-calendar"/></svg>Timeline</button>
+    <button class="nav-item" data-view="people"><svg><use href="#i-people"/></svg>People</button>
+    <button class="nav-item" data-view="review"><svg><use href="#i-spark"/></svg>Needs review<span id="nav-review" class="nav-count"></span></button>
+    <button class="nav-item" data-view="duplicates"><svg><use href="#i-copy"/></svg>Duplicates<span id="nav-duplicates" class="nav-count"></span></button>
+    <button class="nav-item" data-view="favorites"><svg><use href="#i-heart"/></svg>Favorites</button>
+  </nav>
+  <div class="nav-divider"></div>
+  <div class="workspace-label source-heading">SOURCES<button class="tiny" data-action="add" aria-label="Add source folder"><svg><use href="#i-plus"/></svg></button></div>
+  <div id="source-list" class="source-list"><p class="source-empty">Your photo folders will live here.</p></div>
+  <div class="sidebar-bottom">
+    <button class="help-button" data-action="removed-items"><svg><use href="#i-refresh"/></svg>Removed items</button>
+    <div class="privacy-card"><svg><use href="#i-shield"/></svg><div><strong>Stored on this PC</strong><p>Your library stays private.</p></div><span class="status-dot"></span></div>
+    <button class="help-button" data-action="about"><svg><use href="#i-info"/></svg>About Framekeep<span>v1.13</span></button>
+  </div>
+</aside>
+<main>
+  <header class="topbar"><div class="breadcrumb">Library <span>/</span> <strong id="breadcrumb">Albums</strong></div><div class="top-actions"><span class="local-badge"><span class="status-dot"></span>On this PC</span><button class="button primary small" data-action="add"><svg><use href="#i-plus"/></svg>Add folder</button></div></header>
+  <div class="page-content">
+    <section class="page-heading"><div><div class="eyebrow" id="view-label">YOUR COLLECTION</div><h1 id="page-title">Your library</h1><p id="page-subtitle">Photos and videos, organized on your PC.</p></div><button class="button outline" id="organize-button" data-action="organize"><svg><use href="#i-folder"/></svg>Organize copies<svg><use href="#i-arrow"/></svg></button></section>
+    <section id="stats" class="stats" aria-label="Library overview"></section>
+    <section id="welcome" class="welcome hidden"><div><span class="pill">A FRESH START FOR OLD MEMORIES</span><h2>Years of photos.<br>One happy place.</h2><p>Connect a backup folder and rediscover what’s inside.<br>Your originals stay right where they are.</p><div class="welcome-actions"><button class="button cream" data-action="add"><svg><use href="#i-plus"/></svg>Connect your first folder</button><button class="text-button light" data-action="demo">Explore a sample library <span>↗</span></button></div></div><div class="paper-scene" aria-hidden="true"><div class="print print-back"><div class="mini-landscape sunset"></div><span>the little things</span></div><div class="print print-front"><div class="mini-landscape"></div><span>somewhere worth remembering</span></div><div class="scene-spark">✳</div></div></section>
+    <div id="demo-banner" class="notice hidden"><svg><use href="#i-spark"/></svg><span><strong>You’re exploring the sample library.</strong> These are original landscape illustrations, ready to try.</span><button class="text-button" data-action="add">Add your photos <span>↗</span></button></div>
+    <section id="toolbar" class="toolbar"><div class="search-field"><svg><use href="#i-search"/></svg><input id="search" type="search" placeholder="Search filenames, tags, or camera…" aria-label="Search photos"><kbd>/</kbd></div><div class="filters"><select id="filter-year" aria-label="Filter by year"><option value="">All dates</option></select><select id="filter-type" aria-label="Filter by file type"><option value="">All formats</option></select><select id="filter-kind" aria-label="Filter by image category"><option value="">All kinds</option></select><button id="reset-filters" class="icon-button" aria-label="Reset filters" title="Reset filters"><svg><use href="#i-refresh"/></svg></button></div></section>
+    <section id="albums-view" class="hidden" aria-label="Albums"></section>
+    <section id="review-tools" class="hidden" aria-label="Photo review"></section>
+    <section id="category-bar" class="category-bar hidden" aria-label="Image categories"><div id="category-chips" class="category-chips"></div><button id="detect-categories" class="button outline small">Detect categories</button></section>
+    <div id="gallery-top" class="gallery-top"><div><strong id="result-count">Your library</strong><span id="selection-count" aria-live="polite"></span><span class="selection-hint" title="Ctrl+click toggles an item. Shift+click selects a range. Ctrl+A selects all displayed items. Ctrl+C copies originals. Delete removes from Framekeep only.">Ctrl+A select all · Ctrl+C copy · Delete remove</span><button id="select-loaded" class="text-button" aria-keyshortcuts="Control+A Meta+A" title="Select all displayed items (Ctrl+A)">Select displayed</button><button id="clear-selection" class="text-button hidden">Clear selection</button><button id="set-category" class="text-button hidden">Set category</button></div><div class="view-options"><label class="sort-label">Sort by <select id="sort" aria-label="Sort photos"><option value="newest">Newest first</option><option value="oldest">Oldest first</option><option value="name">File name</option><option value="size">Largest first</option></select></label><div class="density-switch" role="group" aria-label="Gallery density"><button data-gallery-density="comfortable" aria-label="Comfortable grid" aria-pressed="true" title="Comfortable grid"><svg><use href="#i-grid"/></svg></button><button data-gallery-density="compact" aria-label="Compact grid" aria-pressed="false" title="Compact grid"><svg><use href="#i-grid-small"/></svg></button></div></div></div>
+    <section id="gallery" aria-live="polite"></section>
+    <section id="people-view" class="hidden"></section>
+    <div id="empty-state" class="empty-state hidden"><div class="empty-symbol"><svg><use href="#i-photo"/></svg></div><h2 id="empty-title">A little space for your story.</h2><p id="empty-description">Add a folder to see your photos here. Nothing is uploaded.</p><button class="button outline" data-action="add">Add a photo folder<svg><use href="#i-arrow"/></svg></button></div>
+    <button id="load-more" class="button outline load-more hidden">Load more photos</button>
+    <footer class="page-footer"><span>Framekeep · Your personal photo library</span><span><svg><use href="#i-shield"/></svg>Original files stay in place.</span></footer>
+  </div>
+</main>
+<div id="selection-toolbar" class="selection-toolbar hidden" role="toolbar" aria-label="Selected media actions"><strong id="selection-toolbar-count" aria-live="polite"></strong><button data-selection-action="copy-files" title="Copy originals (Ctrl+C)"><svg><use href="#i-copy"/></svg>Copy</button><button data-selection-action="copy-folder" title="Organize selected copies"><svg><use href="#i-folder"/></svg>Organize</button><button data-selection-action="remove" title="Remove from Framekeep only (Delete)"><svg><use href="#i-close"/></svg>Remove</button><button class="selection-clear" data-action="clear-selected" aria-label="Clear selected items" title="Clear selection"><svg><use href="#i-close"/></svg></button></div>
+<div id="job-dock" class="job-dock hidden" role="status"><div class="job-top"><span class="job-spinner"></span><strong id="job-label"></strong><span id="job-count"></span><button id="job-cancel" class="text-button">Cancel</button></div><progress id="job-progress" max="100"></progress><div id="job-message"></div></div>
+<div id="toast" class="toast hidden" role="status"></div>
+<div id="context-menu" class="context-menu" popover="manual" role="menu" aria-label="Item actions"></div>
+<dialog id="modal"><div id="modal-content"></div></dialog>
+<dialog id="photo-modal" class="photo-modal"><button class="photo-close icon-button" data-action="close-photo" aria-label="Close photo"><svg><use href="#i-close"/></svg></button><div class="photo-stage"><button class="photo-prev icon-button" id="photo-prev" aria-label="Previous photo"><svg><use href="#i-chevron"/></svg></button><img id="detail-image" alt=""><button class="photo-next icon-button" id="photo-next" aria-label="Next photo"><svg><use href="#i-chevron"/></svg></button></div><aside id="photo-details"></aside></dialog>
+</body>
+</html>
