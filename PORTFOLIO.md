@@ -1,62 +1,39 @@
-# Framekeep portfolio guide
+# Framekeep: organizing old phone backups
 
-Suggested repository name: **framekeep**
+Framekeep began with a personal collection of phone backups that was difficult to browse. Camera photos, screenshots, saved illustrations and iPhone Live Photo clips shared the same folders. Sorting them into new directories helped with storage, but viewing the collection still meant opening folder after folder.
 
-Suggested description:
+The result is a Windows desktop photo library. Framekeep indexes existing folders and presents albums by category and date. It leaves the originals in place, with a separate workflow for creating organized, verified copies.
 
-> A private Windows photo organizer with metadata timelines, on-device face grouping, exact duplicate detection, and verified copy-only exports. Python, FastAPI, SQLite, OpenCV, and vanilla JavaScript.
+![Framekeep gallery using generated sample artwork](docs/screenshots/gallery.jpg)
 
-Suggested topics: python, fastapi, sqlite, opencv, photo-organizer, computer-vision, privacy, windows, portfolio.
+## Browsing without reorganizing the disk
 
-## Recruiter introduction
+Albums come from the local index, so a category correction changes the gallery without moving a file. Photos can be filtered by month, format, camera or tags. Selection supports Ctrl/Shift clicks and keyboard shortcuts for copying files or removing them from the library. Removal is reversible and affects the catalog only.
 
-> Framekeep turns a personal problem—sorting years of old phone backups—into a local photo management application. It combines metadata extraction, streaming file hashing, a persistent SQLite index, and on-device face similarity with a Windows desktop interface. Its copy workflow previews the folder structure, handles filename collisions, and verifies each result without modifying the original collection.
+iPhone backups needed special handling. A Live Photo contains a still image and a motion clip; showing both as unrelated items fills the video album with short clips. Framekeep pairs them using embedded Apple identifiers and displays each pair as one photo. Actual videos have frame thumbnails and an in-app player. Playback uses a local preview, while exports retain both original Live Photo resources.
 
-Describe your role accurately. This project was created with AI coding assistance. Explain the problem, product decisions, testing you performed, and improvements you personally made. Avoid claiming that you independently wrote or trained every part. Its face models are pretrained OpenCV models.
+## Implementation choices
 
-## Two-minute demo
+The application uses Python, FastAPI and SQLite, with a vanilla JavaScript interface inside a pywebview/WebView2 window. The same interface can run in a browser during development. This keeps the desktop and browser views on one code path without a frontend build step.
 
-1. Open Framekeep and choose **Explore a sample library**, then browse its automatic Albums inside the app.
-2. Show the monthly timeline, then filter to PNG, Screenshots or Illustrations. Demonstrate a manual category correction. For visual detection, use a permitted test collection and the optional local model; explain Needs review.
-3. Open a landscape, add a tag, and favorite it.
-4. Open **Needs review**, run **Analyze photos** on permitted sample images, and confirm an uncertain AI category. In **Duplicates**, compare the Exact duplicates and Similar photos tabs and open a side-by-side comparison.
-5. Preview a Category → year → month export to a disposable local output folder. Show Photos/Screenshot/Illustration/Video folders, collision handling, verified copies and the manifest.
-6. For People, use a separate test collection whose subjects have consented. Demonstrate naming, merging, and separating suggestions.
-7. Use a permitted iPhone Live Photo or the generated motion test. Show that its still and motion count as one memory, play its motion, and preview a paired export that retains both originals.
+SQLite stores the catalog and manual corrections; album queries group this data by category and date. Incremental scans use file size and modification time to find changed files, and the gallery fetches results in pages. One background job runs at a time to limit competing work on the source drive. Very large collections still need benchmarking.
 
-The bundled illustrations contain no faces. They do not demonstrate recognition accuracy.
+SHA-256 identifies files with identical contents. Perceptual hashes suggest some resized or recompressed copies for side-by-side review. Only exact duplicates qualify for optional export deduplication; a visual match never removes a photo.
 
-## Decisions worth discussing
+Optional category detection runs a pretrained CLIP model locally. Uncertain results remain in Needs review, and manual corrections survive rescans of unchanged files. People grouping uses pretrained OpenCV YuNet and SFace models, with controls to correct suggested groups.
 
-- A Windows WebView2 host provides a desktop window and icon while reusing the local HTML/CSS/JavaScript interface and authenticated loopback backend. Browser mode remains available for development.
-- Desktop lifecycle separates a newly owned service from an already-running service; a per-launch ownership marker survives Windows Python redirector PIDs. Single-instance events reactivate the existing window, and private WebView profiles are kept separate from normal browsers.
-- EXIF → filename → modified-date precedence makes date uncertainty visible.
-- SHA-256 distinguishes exact copies without discarding near-duplicate memories.
-- Perceptual pHash and dHash, aspect ratio and average color offer conservative visual-copy candidates. A bounded BK-tree search returns direct pairs, with visible analysis coverage and search limits. These suggestions never change the copy-only deduplication rule.
-- Incremental indexing and paginated results make repeat scans and browsing manageable.
-- One background worker avoids competing disk-heavy jobs while the UI stays responsive.
-- Unique export directories, exclusive creation, and hash verification simplify recovery.
-- Local inference removes a hosted recognition dependency; manual corrections acknowledge uncertainty.
-- Automatic albums derive category/year/month groups from the index, so browsing needs no physical file reorganization. The gallery paginates results and the image viewer continues across page boundaries.
-- The interface uses a photo-first hierarchy, two grid densities, a contextual selection toolbar and self-hosted typography. Its [design notes](DESIGN.md) and [editable Figma companion](https://www.figma.com/design/a1Hj30Ogrd9oVQlxw3nW39?node-id=10-5) document the decisions using generated sample artwork only.
-- Live Photo pairing follows shared Apple identifiers rather than guessing from names or timestamps. Logical memories and physical resources are counted separately. On-demand bounded previews provide browser compatibility, while verified exports keep both original resources together.
+## Protecting the originals
 
-## Before publishing
+Exports preview the destination structure, avoid overwriting existing names and verify copied files against their source hashes. Each run records its results in a local manifest. Rotation and cropping also save a new image rather than overwriting the source.
 
-- Run the checks in the README.
-- Keep backups and organized outputs outside the source checkout.
-- Review every file selected for the first commit.
-- Include application code, tests, documentation, license notices, and the sample-only screenshot.
-- Exclude virtual environments, SQLite databases, thumbnails, face crops/vectors, ONNX weights, logs, manifests, and private photos.
-- Use only sample illustrations or images you have permission to publish in screenshots.
+The backend listens on the loopback interface and requires session credentials. Original-media parsing runs in disposable processes with time and memory limits. This contains resource use and decoder failures; the workers still run as the current Windows user. Thumbnails, metadata and face data remain local and are not encrypted at rest. The [README](README.md#privacy-and-local-data) documents the boundaries and limits.
 
-No GitHub repository is created or pushed by the setup scripts. GitHub Pages cannot run the Python backend or access a visitor's local folders. Recruiters can inspect the source, follow setup instructions, and view the sample screenshot. A downloadable desktop release can be added later.
+## Validation and remaining work
 
-## Future work
+The [test suite](tests/) covers metadata precedence, incremental scans, corrupt media, session authentication, path boundaries, worker limits, Live Photo pairing and verified exports. GitHub Actions runs the checks on Windows. Optional tests that need model assets stay offline and are skipped in CI when those assets are absent.
 
-- Standalone Windows executable and installer; the current desktop launch still uses the checkout and Python virtual environment.
-- Broader near-duplicate evaluation for crops, burst photos and color edits.
-- Date correction and timezone handling.
-- Large-library benchmarks and more varied face evaluation.
-- Broader video container support, progressive playback for longer videos, custom thumbnail selection and HDR tone mapping.
-- Automated browser regression tests and accessibility improvements.
+Local smoke tests exercise category detection and face grouping, but do not establish general recognition accuracy. Categories can be ambiguous, face matches need review, and perceptual hashes can miss crops or burst photos. The gallery screenshot uses generated landscapes and contains no personal library data.
+
+The current release launches from a Python environment. A standalone installer, large-library benchmarks, broader visual-match evaluation and automated browser accessibility checks remain future work. [Interface notes](DESIGN.md) describe the gallery layout and selection behavior; [setup instructions](README.md#run-on-windows) cover running the application.
+
+Framekeep was developed with AI coding assistance. Its recognition models are pretrained; model sources and licenses are listed in [Third-party notices](THIRD_PARTY_NOTICES.md).

@@ -1,36 +1,25 @@
 <p align="center"><img src="framekeep/static/icon.svg" width="64" alt="Framekeep"></p>
 <h1 align="center">Framekeep</h1>
-<p align="center"><strong>Your memories, back in order.</strong><br>A private photo organizer for years of old phone backups. Built for Windows.</p>
+<p align="center">A local photo library for Windows. Browse phone backups without moving the originals.</p>
 
 [![Tests](https://github.com/beekind78/framekeep/actions/workflows/ci.yml/badge.svg)](https://github.com/beekind78/framekeep/actions/workflows/ci.yml)
 
 ![Framekeep gallery with original sample illustrations](docs/screenshots/gallery.jpg)
 
-Old phone backups become a maze of folders, renamed files, screenshots, and duplicate copies. Framekeep indexes those folders in place, helps you find the photos you want, and creates a verified, organized copy without changing the originals.
+Phone backups can mix camera photos, screenshots, saved artwork and Live Photo video clips in the same folder. Framekeep groups them into albums you can browse inside the app. Originals stay in place; creating organized copies is optional.
+
+Read the [project case study](PORTFOLIO.md) for the background, implementation choices and current limits, or follow the [Windows setup](#run-on-windows) to try it with the sample library.
 
 ## Features
 
-- **Open a Windows desktop window** with the Framekeep icon, Desktop/Start menu shortcuts and one-window reuse. Microsoft WebView2 displays the local interface without opening a browser tab. Closing an app-owned instance stops its local service; original images and index data persist.
-- **Browse a focused photo workspace.** A forest navigation rail, locally bundled DM Sans, larger captions, automatic album covers and comfortable/compact grids keep the pictures prominent. Date filters expand when needed, and a selected-item toolbar brings Copy, Organize and recoverable Remove into reach. See [the interface design notes](DESIGN.md) and the [editable demo-only Figma design](https://www.figma.com/design/a1Hj30Ogrd9oVQlxw3nW39?node-id=10-5).
-
-- **Connect local folders** and recursively index JPG/JPEG, PNG, HEIC/HEIF, WebP, GIF, TIFF, BMP, and AVIF images. Bounded header checks find photos even when backup filenames have incorrect extensions such as `.MOV` or `.AAE`.
-- **Include MOV/MP4 videos** using bounded container metadata reads without decoding frames during indexing. Video cards show duration, with capture dates taken from movie metadata where available. Copying retains the original video without transcoding.
-- **Browse iPhone Live Photos as one memory.** Match HEIC/JPEG stills and MOV motion using their shared embedded Apple identifier, even when filenames differ. Live Photos appear in Photos with an optional Live Photos only filter and a Play Live Photo button. Paired motion is hidden from the ordinary video gallery. Missing identifiers, conflicting identifiers and ambiguous multiple matches stay separate. A separately installed FFmpeg enables local motion previews; the originals are retained without conversion.
-- **Play videos inside the app.** Open a video and click the play icon on its thumbnail for full-length playback with sound, seek, volume, speed and fullscreen controls. The thumbnail also supports Enter/Space and shows a preparation indicator. FFmpeg prepares a private H.264/AAC playback copy, including for HEVC iPhone videos and MOV content with an incorrect filename extension. A 512 MiB managed cache avoids repeated conversion. No photo or video is uploaded.
-- **Recognize videos before opening them.** Video cards and album covers show a real frame, with a small play marker and duration. Posters are generated locally as cards come into view and cached automatically; no rescan or full playback preparation is required. Failed or unsupported thumbnails retain a readable placeholder and filename.
-- **Right-click photos and source folders.** Open, copy original files to the Windows clipboard, copy a path, create verified copies in another folder, edit tags/categories, favorite, or reveal the original. Source menus include open, rescan, reveal and Remove folder from Framekeep. Shift+F10 opens the same menu from the keyboard.
-- **Select several items with Ctrl / Shift.** Ctrl+click toggles individual cards; Shift+click selects a range in the displayed order, and Ctrl+Shift adds a range to the selection. Checkboxes remain available. Ctrl+A selects all currently displayed items, Ctrl+C copies the selected originals to the Windows clipboard, and Delete opens the same recoverable removal confirmation as the context menu. Load more items first to include them. These shortcuts leave typing fields, dialogs, the photo/video viewer, and open context menus alone; holding a key does not repeat an action. Originals stay in place and Live Photo motion resources are included in copies and removal. Right-clicking a selected card opens actions for the complete selection: copy originals, copy paths, copy to a folder, or remove from Framekeep. Right-clicking an unselected card selects that card alone. The menu and removal confirmation show the selection count. Batch actions accept up to 5,000 items, expand Live Photo pairs once, and reject stale or unavailable selections without partially removing other items.
-- **Rotate and crop a copy.** Edit image copy opens a local preview with rotation and a draggable crop. Saving decodes the verified full-resolution original in a bounded worker and creates a new JPEG in a separate folder, with exclusive file creation and hash verification. The original is never overwritten. Live Photo editing produces a still JPEG; both original resources remain intact.
-- **Remove from the app and restore later.** Removing an item or source only changes the local catalog. Files remain in File Explorer. Removed items in the sidebar restores folders or individual items and rescans the source. Tags, categories, favorites and people matches are retained; individual removals remain hidden during ordinary rescans. Removing a Live Photo hides/restores both original resources together.
-- **Browse a timeline** using camera metadata, a date in the filename, or file-modified time. The UI tells you which source supplied the date.
-- **Browse automatic albums inside the app** for Photos, Screenshots, Illustrations, Videos and Needs review. Open an album to see every month together, or jump directly to a year/month. Viewing albums does not create, move or copy source files. The viewer continues into the next result page when you reach the end of the loaded pictures.
-- **Filter and search** by year, month, extension, image category, filename, camera, and tags. Save favorites and select individual photos.
-- **Separate Photos, Screenshots and Illustrations** with an optional local CLIP visual model. Uncertain results go to Needs review. Correct one image or a selected group; manual choices survive rescans of unchanged files.
-- **Find exact duplicates** with streaming SHA-256 hashing. Optional deduplication applies only to the new copies.
-- **Review AI categories and possible visual copies** inside the app. Needs review shows the local model's best category suggestion for one-click confirmation. Duplicates has separate Exact duplicates and Similar photos tabs, with side-by-side comparisons. Conservative perceptual hashes find some resized or recompressed copies; possible matches never trigger deletion, merging, or export deduplication.
-- **Suggest groups of people** with OpenCV YuNet detection and SFace embeddings on the CPU. Rename, merge, and separate matches.
-- **Preview an organized collection** by category → year → named month, date, format, category, date + format, date + category, or people. Every copy is hash-verified and recorded in a local CSV manifest.
-- **Try a sample library** of original procedural landscape illustrations. No personal photos, cloud account, API key, or external image assets are needed.
+- Browse albums and a monthly timeline, with filters for category, date, format, camera, filename and tags. Choose a comfortable or compact grid, save favorites and correct categories in place.
+- Index JPEG, PNG, HEIC/HEIF, WebP, GIF, TIFF, BMP and AVIF images, plus MOV/MP4 videos. Media checks use file contents to handle incorrect backup extensions.
+- View an iPhone Live Photo as one photo, with its motion clip available in the viewer. Pairing uses embedded Apple identifiers; uncertain matches stay separate.
+- See real video frames in thumbnails and click the play icon to watch inside the app. A separately installed FFmpeg prepares local previews with sound, seek, speed and fullscreen controls.
+- Copy selected originals to the Windows clipboard, edit tags, or rotate and crop a new image copy. Removing photos or folders from Framekeep leaves their files on disk and allows restoration from the sidebar.
+- Find exact duplicates with SHA-256, and review possible resized or recompressed copies side by side. Optional local models suggest photo categories and groups of people; their results can be corrected manually.
+- Preview an export by category → year → month, date, format or people. Copies use collision-safe filenames, hash verification and a local CSV manifest. Live Photo exports keep both original resources together.
+- Explore generated sample landscapes before adding a personal folder. The app needs no cloud account or API key.
 
 ## Run on Windows
 
@@ -87,9 +76,19 @@ Direct output reuses existing folders without overwriting files; conflicting nam
 
 Photo formats are confirmed by the image decoder, and videos require a video track in their MOV/MP4 metadata. If a filename extension is wrong, organized copies receive the detected extension (for example, JPEG data named `photo.MOV` becomes `photo.jpg`, while a QuickTime movie named `clip.HEIC` becomes `clip.mov`). Source names and contents stay unchanged. Scan reports count photos, videos and skipped metadata separately; video files are never decoded as photos.
 
+## Selection and editing
+
+Ctrl+click toggles a card, Shift+click selects a range in the displayed order, and Ctrl+Shift adds a range. Checkboxes also work. Ctrl+A selects all currently displayed items; load more results first to include them. Ctrl+C copies selected originals to the Windows clipboard. Delete opens a confirmation to remove them from Framekeep, leaving the files on disk. These shortcuts do not intercept typing fields, dialogs, the viewer or open menus.
+
+Right-click a selected card to act on the whole selection. Right-click an unselected card to select it alone. The menu offers copying files or paths, verified copies to another folder, and removal from the catalog. It also provides tags, categories, favorites, image editing and Show original in folder for individual items. Shift+F10 opens the menu from the keyboard. Source-folder menus include open, rescan, reveal and Remove folder from Framekeep.
+
+Batch actions accept up to 5,000 items and include linked Live Photo resources once. Stale or unavailable selections are rejected without partially removing other items. **Removed items** in the sidebar restores photos or folders and rescans their source. Tags, categories, favorites and people matches are retained, and ordinary rescans keep individual removals hidden.
+
+**Edit image copy** provides rotation and a draggable crop, then saves a new JPEG in a separate folder. Saving uses the full-resolution source and verifies the output. Editing a Live Photo or animation creates a still image; its original resources remain intact.
+
 ## Privacy and local data
 
-There are no photo uploads, analytics scripts, third-party fonts, cloud inference calls, or required logins. Internet access is needed for package installation and optional model downloads. ONNX Runtime telemetry is disabled in the category worker.
+Framekeep does not upload photos, run analytics or send inference requests to a cloud service. Fonts and interface assets are bundled locally, and the app needs no login. Internet access is needed for package installation and optional model downloads. ONNX Runtime telemetry is disabled in the category worker.
 
 The default data location is **%USERPROFILE%\.framekeep\data**. This profile location is shared by ordinary Windows launches and processes started from packaged desktop apps, avoiding AppData virtualization. It contains the SQLite index, thumbnails, face previews/vectors, model weights, and optional demo illustrations. Set the FRAMEKEEP_DATA environment variable before starting to use another location. Versions before 1.1.1 used AppData; keep that directory until existing library data has been migrated.
 
@@ -175,12 +174,10 @@ The face pipeline was also smoke-tested with an OpenCV sample face and a rotated
 - Worker limits intentionally reject very large photos; process startup adds scanning overhead. Up to 50 detected faces are extracted per image.
 - The Windows launchers and folder picker are the supported desktop workflow. There is no signed installer or standalone executable in this release.
 
-## Portfolio and license
+## Project background and license
 
-See [PORTFOLIO.md](PORTFOLIO.md) for a demo script and source-only publishing guidance.
+The [project case study](PORTFOLIO.md) describes the problem, implementation choices, validation and remaining work. [Interface notes](DESIGN.md) cover the gallery layout and selection behavior.
+
+Framekeep was developed with AI coding assistance and uses pretrained recognition models.
 
 Application code and original demo illustrations: [MIT](LICENSE). Model weights have separate licenses; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
-
-## Project notes
-
-Built with AI coding assistance. The [portfolio guide](PORTFOLIO.md) documents the problem, implementation choices, validation and limitations.

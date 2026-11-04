@@ -1,12 +1,12 @@
 # Framekeep interface
 
-Framekeep is a desktop photo library for browsing large phone backups. The pictures should take precedence over interface decoration. Most sessions involve filtering a month, comparing thumbnails, selecting a group and copying or removing it from the index.
+Framekeep's gallery puts thumbnails, dates and filenames together so a collection can be browsed without opening each file. The layout supports filtering a month, comparing pictures and acting on a selection.
 
 ## Direction
 
-Use a dark forest navigation rail alongside a light, neutral gallery. Keep the existing Framekeep mark. The rail separates navigation from content without enclosing every control in a card. Green identifies selection and primary actions; warm red is reserved for removal. Display factual counts and short instructions instead of promotional headings.
+A dark forest navigation rail sits beside a light gallery. It separates source folders and library views from the pictures. Green marks selection and primary actions; warm red marks removal. Page headings show the current view and item count, with instructions beside the controls that need them.
 
-The redesign takes inspiration from [Antislop](https://antislop.ai.id/) and [Style UI](https://style.ai.id/): purposeful visual hierarchy, readable contrast, restrained decoration and controls chosen for the task. These are references, not dependencies or bundled third-party interface code.
+The redesign used [Antislop](https://antislop.ai.id/) and [Style UI](https://style.ai.id/) as references for hierarchy, contrast and restrained decoration. The application does not depend on either site or bundle their interface code.
 
 ## Foundations
 
@@ -37,4 +37,4 @@ The readable stylesheet is `framekeep/static/workspace.css`. Existing specialize
 
 ## Figma and privacy
 
-The [editable companion design](https://www.figma.com/design/a1Hj30Ogrd9oVQlxw3nW39?node-id=10-5) uses generated sample artwork and demo filenames. Personal libraries, original photos, catalog data and runtime capabilities must never be uploaded. A separate static demo export is used for capture; the installed app retains its strict content security policy.
+The [Figma companion](https://www.figma.com/design/a1Hj30Ogrd9oVQlxw3nW39?node-id=10-5) uses generated sample artwork and demo filenames. It contains no personal library data. Capture uses a separate static demo export, so the installed app keeps its content security policy. The [publishing notes](docs/PUBLISHING.md) describe how source releases exclude personal media, catalogs and runtime credentials.
