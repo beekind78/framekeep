@@ -26,7 +26,7 @@ Optional category detection runs a pretrained CLIP model locally. Uncertain resu
 
 Exports preview the destination structure, avoid overwriting existing names and verify copied files against their source hashes. Each run records its results in a local manifest. Rotation and cropping also save a new image rather than overwriting the source.
 
-The backend listens on the loopback interface and requires session credentials. Original-media parsing runs in disposable processes with time and memory limits. This contains resource use and decoder failures; the workers still run as the current Windows user. Thumbnails, metadata and face data remain local and are not encrypted at rest. The [README](README.md#privacy-and-local-data) documents the boundaries and limits.
+The backend listens on the loopback interface and requires session credentials. Original-media parsing runs in disposable processes with time and memory limits. This contains resource use and decoder failures; the workers still run as the current Windows user. Thumbnails, metadata and face data remain local and are not encrypted at rest. The [technical reference](docs/TECHNICAL.md#local-access-and-desktop-restrictions) documents the boundaries and limits.
 
 ## Validation and remaining work
 
