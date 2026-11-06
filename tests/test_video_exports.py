@@ -14,7 +14,7 @@ from framekeep.app import create_app
 from framekeep.categories import Categories
 from framekeep.image_processing import process_video
 from framekeep.library import Library, file_hash
-from framekeep.output_files import output_directory
+from framekeep.output_files import ApprovedOutput, new_output_file, output_directory
 from framekeep.people import People
 from tests.media_fixtures import atom, video_bytes
 
@@ -189,6 +189,37 @@ def test_direct_output_rejects_existing_junction_or_symlink(tmp_path):
         link.rmdir() if sys.platform == "win32" else link.unlink()
 
 
+@pytest.mark.parametrize("linked", [False, True])
+def test_export_rejects_replacement_of_approved_destination(tmp_path, linked):
+    source, root, outside = (tmp_path / name for name in ("source", "output", "outside"))
+    for folder in (source, root, outside):
+        folder.mkdir()
+    Image.new("RGB", (80, 50), "teal").save(source / "photo.jpg")
+    library = Library(tmp_path / "data")
+    library.scan(library.add(str(source)), lambda *args: None, lambda: False)
+    preview = library.plan(str(root), "date", {}, False)
+    root.rename(tmp_path / "original-output")
+    if not linked:
+        root.mkdir()
+    elif sys.platform == "win32":
+        result = subprocess.run(
+            ["cmd.exe", "/d", "/c", "mklink", "/J", str(root), str(outside)],
+            capture_output=True, text=True, check=False,
+        )
+        assert result.returncode == 0, result.stderr
+    else:
+        root.symlink_to(outside, target_is_directory=True)
+
+    try:
+        with pytest.raises(ValueError, match="changed|link"):
+            library.export(library.consume_plan(preview["token"]), lambda *args: None, lambda: False)
+        assert not list(root.iterdir())
+        assert not list(outside.iterdir())
+    finally:
+        if linked:
+            root.rmdir() if sys.platform == "win32" else root.unlink()
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows output directory handle sharing")
 def test_windows_output_directory_cannot_be_swapped_while_copying(tmp_path):
     root = tmp_path / "output"
@@ -197,3 +228,22 @@ def test_windows_output_directory_cannot_be_swapped_while_copying(tmp_path):
         (root / "Photos").rename(root / "moved")
     (root / "Photos").rename(root / "moved")
     assert (root / "moved").is_dir()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permits renaming an open directory")
+def test_copy_failure_cannot_unlink_an_outside_file_after_directory_swap(tmp_path):
+    root, outside, moved = (tmp_path.resolve() / name for name in ("output", "outside", "moved"))
+    root.mkdir()
+    outside.mkdir()
+    existing = outside / "copy.jpg"
+    existing.write_bytes(b"existing copy")
+    approved = ApprovedOutput.inspect(root)
+    with (
+        pytest.raises(ValueError, match="outside its expected destination"),
+        new_output_file(approved, Path("copy.jpg")) as (_, stream),
+    ):
+        stream.write(b"generated copy")
+        root.rename(moved)
+        root.symlink_to(outside, target_is_directory=True)
+    assert existing.read_bytes() == b"existing copy"
+    assert not list(moved.iterdir())

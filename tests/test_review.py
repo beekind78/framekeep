@@ -100,13 +100,14 @@ def test_direct_pairs_do_not_transitively_claim_unmatched_images_and_limits_are_
     assert similarity.find_pairs(rows, cancelled=lambda: True)[1]
 
 
-def test_review_rechecks_uncertain_ai_keeps_manual_categories_and_skips_videos(collection, monkeypatch):
+def test_review_refreshes_older_uncertain_ai_keeps_manual_categories_and_skips_videos(collection, monkeypatch):
     library, service, source, _ = collection
     rows = {p["filename"]: p for p in library.photos({}, None)["photos"]}
     library.assign_kind([rows["original.png"]["id"]], "Illustrations")
     with library.connect() as db:
         db.execute("UPDATE photos SET kind='Photos',kind_source='model',category_version=? WHERE filename!='smaller.jpg' AND kind_override IS NULL AND media_type='image'", (MODEL_VERSION,))
-        db.execute("UPDATE photos SET kind='Needs review',kind_suggestion='Photos',category_version=? WHERE filename='smaller.jpg'", (MODEL_VERSION,))
+        db.execute("UPDATE photos SET kind='Needs review',kind_source='uncertain',kind_suggestion='Photos',"
+                   "category_version=? WHERE filename='smaller.jpg'", (MODEL_VERSION - 1,))
     service.categories.ready = lambda: True
     calls = []
 

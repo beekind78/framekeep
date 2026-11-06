@@ -2,13 +2,17 @@
 
 import base64
 import json
+import os
 import urllib.request
+from collections import Counter, OrderedDict
 from pathlib import Path
 
 import numpy as np
 
-from .image_processing import process_image
-from .library import file_hash
+from .checkpoints import photo_identity, run_items
+from .image_processing import process_faces
+from .library import file_hash, scan_hash
+from .source_files import file_identity, open_source, require_file_identity
 
 ZOO_COMMIT = "48b10fa505aeb51fbd127fc60a5c660040e823b7"
 MODELS = {
@@ -21,6 +25,46 @@ MODELS = {
         "0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79",
     ),
 }
+
+
+def embedding(value):
+    vector = np.asarray(value, dtype=np.float32)
+    if vector.shape != (128,) or not np.isfinite(vector).all():
+        raise ValueError("Invalid face embedding.")
+    return vector
+
+
+class FaceMatcher:
+    """Keep the first eight references per person and compare them in one vector operation."""
+
+    def __init__(self):
+        self.vectors = np.empty((64, 128), dtype=np.float32)
+        self.people = np.empty(64, dtype=np.int64)
+        self.counts = Counter()
+        self.size = 0
+
+    def add(self, person_id, vector):
+        if self.counts[person_id] >= 8:
+            return
+        if self.size == len(self.people):
+            self.people = np.resize(self.people, self.size * 2)
+            self.vectors = np.resize(self.vectors, (self.size * 2, 128))
+        self.people[self.size] = person_id
+        self.vectors[self.size] = vector
+        self.counts[person_id] += 1
+        self.size += 1
+
+    def restore(self, size):
+        self.counts.subtract(self.people[size:self.size])
+        self.size = size
+
+    def match(self, vector):
+        if not self.size:
+            return None
+        scores = np.einsum("ij,j->i", self.vectors[:self.size], vector)
+        best = float(scores.max())
+        # Keep the existing conservative cutoff and deterministic tie break.
+        return int(self.people[:self.size][scores == best].max()) if best >= .48 else None
 
 
 class People:
@@ -61,72 +105,121 @@ class People:
         progress(2, 2, "People models ready")
         return {"ready": True}
 
-    def analyze(self, progress, cancelled):
+    @staticmethod
+    def _filters(scope):
+        date = scope.get("date", "")
+        return {"library": scope.get("library", ""), "year": date[:4], "month": date if len(date) == 7 else "",
+                "kind": "Photos" if scope.get("photos_only") else "", "media_type": "image", "pending_faces": True}
+
+    def queue(self, scope):
+        where, args = self.library.where(self._filters(scope))
+        with self.library.connect() as db:
+            pending = db.execute(f"SELECT count(*) FROM photos p WHERE {where}", args).fetchone()[0]
+        return {"pending": pending, "in_run": min(pending, scope.get("limit") or pending)}
+
+    def analyze(self, progress, cancelled, *, scope=None, checkpoint=None):
         if not self.ready():
             raise ValueError("Download the people models first.")
         for name, (_, checksum) in MODELS.items():
-            if file_hash(self.models / name) != checksum:
+            model = self.models / name
+            if model.stat().st_size > 50 * 1024 * 1024 or file_hash(model) != checksum:
                 raise ValueError("A people model is damaged. Download the models again.")
-        with self.library.connect() as db:
-            rows = [
-                dict(row)
-                for row in db.execute(
-                    "SELECT p.*,l.path AS source_root FROM photos p JOIN libraries l ON l.id=p.library_id "
-                    "WHERE p.missing=0 AND p.media_type='image' AND p.face_state='pending' ORDER BY p.id"
-                )
-            ]
-            references = [
-                (r["person_id"], np.array(json.loads(r["embedding"]), dtype=np.float32))
-                for r in db.execute("SELECT person_id,embedding FROM faces")
-            ]
-        # Keep a bounded collection of references per person for large phone backups.
-        exemplars = {}
-        for person_id, vector in references:
-            exemplars.setdefault(person_id, [])
-            if len(exemplars[person_id]) < 8:
-                exemplars[person_id].append(vector)
-        errors, found = [], 0
-        for index, photo in enumerate(rows):
-            if cancelled():
-                break
-            progress(index, len(rows), photo["filename"])
-            try:
-                processed = process_image(
-                    Path(photo["path"]), Path(photo["source_root"]), 1600, models=self.models
-                )
+        scope = scope or {}
+        rows = self.library.analysis_rows(self._filters(scope), checkpoint, limit=scope.get("limit") or None)
+        matcher = self._references()
+        duplicates = Counter(row["sha256"] for row in rows if row["face_state"] == "pending")
+        cached = OrderedDict()
+
+        def analyze_photo(photo):
+            if photo["face_state"] == "done":
+                # A restart can fall between committing the faces and recording the receipt.
                 with self.library.connect() as db:
-                    for face in processed["faces"]:
-                        vector = np.array(face["embedding"], dtype=np.float32)
-                        matches = [
-                            (max(float(np.dot(vector, ref)) for ref in refs), pid)
-                            for pid, refs in exemplars.items()
-                        ]
-                        best = max(matches, default=(-1, None))
-                        # Stricter than OpenCV's example threshold: prefer extra groups over false merges.
-                        person_id = best[1] if best[0] >= 0.48 else None
-                        if person_id is None:
-                            person_id = db.execute(
-                                "INSERT INTO persons(name) VALUES ('Unnamed person')"
-                            ).lastrowid
-                            db.execute(
-                                "UPDATE persons SET name=? WHERE id=?", (f"Person {person_id}", person_id)
-                            )
-                            exemplars[person_id] = []
-                        if len(exemplars[person_id]) < 8:
-                            exemplars[person_id].append(vector)
-                        face_id = db.execute(
-                            "INSERT INTO faces(photo_id,person_id,embedding) VALUES (?,?,?)",
-                            (photo["id"], person_id, json.dumps(vector.tolist())),
-                        ).lastrowid
-                        (self.faces / f"{face_id}.jpg").write_bytes(
-                            base64.b64decode(face["jpeg"], validate=True)
-                        )
-                        found += 1
-                    db.execute("UPDATE photos SET face_state='done' WHERE id=?", (photo["id"],))
-            except (OSError, ValueError) as error:
-                errors.append({"file": photo["filename"], "reason": str(error)})
-        progress(len(rows), len(rows), "People analysis complete")
-        return {"faces": found, "error_count": len(errors), "errors": errors[:30], "cancelled": cancelled()}
+                    count = db.execute("SELECT count(*) FROM faces WHERE photo_id=?", (photo["id"],)).fetchone()[0]
+                return {"faces": count}
+            start = matcher.size
+            digest = photo["sha256"]
+            try:
+                known = cached.get(digest)
+                faces = self._detect(photo, known, cancelled)
+                if faces is None:
+                    return None
+                self._save_faces(photo, faces, matcher)
+                if duplicates[digest] > 1:
+                    cached[digest] = faces
+                    cached.move_to_end(digest)
+                    if len(cached) > 32:
+                        cached.popitem(last=False)
+                return {"faces": len(faces), "reused": known is not None}
+            except (OSError, ValueError, TypeError) as error:
+                matcher.restore(start)
+                return {"error": {"file": photo["filename"], "reason": str(error)}}
+
+        outcomes = run_items(
+            rows, photo_identity, analyze_photo, progress, cancelled, checkpoint,
+            check_sources=lambda pending: self.library.check_analysis_sources(
+                photo for photo in pending if photo["face_state"] == "pending"
+            ),
+        )
+        errors = [item["error"] for item in outcomes if "error" in item]
+        if not cancelled():
+            progress(len(rows), len(rows), "People analysis complete")
+        return {"faces": sum(item.get("faces", 0) for item in outcomes),
+                "reused": sum(item.get("reused", False) for item in outcomes),
+                "error_count": len(errors), "errors": errors[:30], "cancelled": cancelled()}
+
+    def _references(self):
+        matcher = FaceMatcher()
+        with self.library.connect() as db:
+            rows = db.execute(
+                """SELECT person_id,embedding FROM (
+                     SELECT f.person_id,f.embedding,row_number() OVER (PARTITION BY f.person_id ORDER BY f.id) AS rank
+                     FROM faces f JOIN photos p ON p.id=f.photo_id WHERE p.missing=0
+                   ) WHERE rank<=8"""
+            )
+            for row in rows:
+                try:
+                    matcher.add(row["person_id"], embedding(json.loads(row["embedding"])))
+                except (ValueError, TypeError):
+                    continue
+        return matcher
+
+    def _detect(self, photo, known, cancelled):
+        path, root = Path(photo["path"]), Path(photo["source_root"])
+        with open_source(path, root) as source:
+            info = os.fstat(source.fileno())
+            if (info.st_size, info.st_mtime_ns) != (photo["size"], photo["mtime_ns"]):
+                raise ValueError("Source changed since indexing. Rescan before finding people.")
+            identity = file_identity(info)
+            faces = known if known is not None else process_faces(path, root, self.models, expected=identity)
+            digest = scan_hash(source, info, cancelled)
+            if digest is None:
+                return None
+            if digest != photo["sha256"]:
+                raise ValueError("Source contents changed. Rescan before finding people.")
+            with open_source(path, root) as current:
+                require_file_identity(current, identity)
+        return faces
+
+    def _save_faces(self, photo, faces, matcher):
+        with self.library.connect() as db:
+            changed = db.execute(
+                "UPDATE photos SET face_state='done' WHERE id=? AND sha256=? AND missing=0 AND face_state='pending'",
+                (photo["id"], photo["sha256"]),
+            ).rowcount
+            if not changed:
+                raise ValueError("The indexed photo changed. Rescan before finding people.")
+            for face in faces:
+                vector = embedding(face["embedding"])
+                person_id = matcher.match(vector)
+                if person_id is None:
+                    person_id = db.execute("INSERT INTO persons(name) VALUES ('Unnamed person')").lastrowid
+                    db.execute("UPDATE persons SET name=? WHERE id=?", (f"Person {person_id}", person_id))
+                face_id = db.execute(
+                    "INSERT INTO faces(photo_id,person_id,embedding) VALUES (?,?,?)",
+                    (photo["id"], person_id, json.dumps(vector.tolist())),
+                ).lastrowid
+                (self.faces / f"{face_id}.jpg").write_bytes(base64.b64decode(face["jpeg"], validate=True))
+                matcher.add(person_id, vector)
 
     def rename(self, person_id: int, name: str):
         name = name.strip()

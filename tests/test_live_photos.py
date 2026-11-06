@@ -202,7 +202,7 @@ def test_on_demand_motion_cache_and_changed_or_unpaired_sources_fail(live_librar
     motion = Motion(library)
     still = library.photos({"live_only": True}, 1)["photos"][0]
     calls = []
-    monkeypatch.setattr(motion_module.shutil, "which", lambda _: "ffmpeg")
+    monkeypatch.setattr(motion_module, "ffmpeg_executable", lambda: "ffmpeg")
     monkeypatch.setattr(motion_module, "process_motion", lambda *args: calls.append(args) or b"test-mp4")
     assert motion.preview(still["id"]) == motion.preview(still["id"]) == b"test-mp4"
     assert len(calls) == 1

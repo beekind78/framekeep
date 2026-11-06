@@ -83,6 +83,12 @@ def test_batch_api_copies_one_clipboard_payload_and_enforces_access_and_limits(c
         assert {Path(path).name for path in files[0]} == {"one.jpg","live.JPG","motion.MOV"}
         response = client.post("/api/photos/clipboard",json={"ids":[first,live,first],"mode":"path"},headers=headers)
         assert response.json() == {"copied":2} and texts == [str(root/"one.jpg")+"\r\n"+str(root/"live.JPG")]
+        response = client.post("/api/photos/clipboard", json={"ids": [motion, first, motion], "mode": "name"}, headers=headers)
+        assert response.json() == {"copied": 2} and texts[-1] == "motion.MOV\r\none.jpg"
+        source_copy = f"/api/libraries/{library.photo(first)['library_id']}/clipboard"
+        assert client.post(source_copy).status_code == 401
+        assert client.post(source_copy, headers=headers).json() == {"copied": 1}
+        assert texts[-1] == root.name
         assert client.post("/api/photos/remove",json={"ids":[first,999999]},headers=headers).status_code == 400
         assert library.photo(first)
         response = client.post("/api/photos/remove",json={"ids":ids},headers=headers)

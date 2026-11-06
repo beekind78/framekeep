@@ -9,8 +9,10 @@ import os
 import re
 import shutil
 import sqlite3
+import tempfile
 import threading
 import uuid
+from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -18,12 +20,20 @@ from pathlib import Path
 from PIL import Image, UnidentifiedImageError
 from pillow_heif import register_heif_opener
 
-from .category_model import CATEGORIES, MODEL_NAME, initial_category
-from .image_processing import MAX_FILE_BYTES, POLICY_VERSION, process_image, process_video
+from .category_model import CATEGORIES, MODEL_NAME, MODEL_VERSION, initial_category
+from .checkpoints import run_items
+from .image_processing import MAX_FILE_BYTES, POLICY_VERSION, TruncatedJPEGError, process_image, process_video
 from .live_metadata import VERSION as LIVE_VERSION
 from .media_types import PHOTO_EXTENSIONS, media_kind
-from .output_files import check_output_stream, output_directory
-from .source_files import is_link, open_source, source_path
+from .output_files import (
+    ApprovedOutput,
+    new_output_file,
+    new_output_folder,
+    output_directory,
+    pinned_directory,
+)
+from .paths import recovery_directory
+from .source_files import file_identity, open_source, require_file_identity, source_entries
 
 register_heif_opener()
 EXTENSIONS = PHOTO_EXTENSIONS
@@ -57,6 +67,12 @@ CREATE TABLE IF NOT EXISTS libraries (
  id INTEGER PRIMARY KEY, path TEXT UNIQUE NOT NULL, name TEXT NOT NULL,
  demo INTEGER NOT NULL DEFAULT 0, scanned_at TEXT
 );
+CREATE TABLE IF NOT EXISTS forgotten_id_limits (
+ table_name TEXT PRIMARY KEY, highest_id INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS category_review_batches (
+ id TEXT PRIMARY KEY, kind TEXT NOT NULL, item_count INTEGER NOT NULL, created_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS photos (
  id INTEGER PRIMARY KEY, library_id INTEGER NOT NULL REFERENCES libraries(id),
  path TEXT UNIQUE NOT NULL, filename TEXT NOT NULL, extension TEXT NOT NULL,
@@ -69,12 +85,14 @@ CREATE TABLE IF NOT EXISTS photos (
 );
 CREATE INDEX IF NOT EXISTS photos_dates ON photos(captured_at);
 CREATE INDEX IF NOT EXISTS photos_hashes ON photos(sha256);
+CREATE INDEX IF NOT EXISTS photos_library ON photos(library_id);
 CREATE TABLE IF NOT EXISTS persons (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS faces (
  id INTEGER PRIMARY KEY, photo_id INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
  person_id INTEGER NOT NULL REFERENCES persons(id), embedding TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS faces_person ON faces(person_id);
+CREATE INDEX IF NOT EXISTS faces_photo ON faces(photo_id);
 CREATE TABLE IF NOT EXISTS visual_fingerprints (
  photo_id INTEGER PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,
  sha256 TEXT NOT NULL, phash TEXT NOT NULL, dhash TEXT NOT NULL,
@@ -98,6 +116,39 @@ def file_hash(path: Path, root: Path | None = None) -> str:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def scan_hash(stream, info, cancelled) -> str | None:
+    digest = hashlib.sha256()
+    remaining = info.st_size
+    while remaining:
+        if cancelled():
+            return None
+        block = stream.read(min(remaining, 1024 * 1024))
+        if not block:
+            raise ValueError("File changed during indexing; rescan to retry.")
+        remaining -= len(block)
+        digest.update(block)
+    require_file_identity(stream, file_identity(info))
+    return digest.hexdigest() if not cancelled() else None
+
+
+def copy_verified_original(
+    source: Path, source_root: Path, sha256: str, root: Path | ApprovedOutput, relative: Path,
+) -> Path:
+    with open_source(source, source_root) as input_file:
+        info = os.fstat(input_file.fileno())
+        if hashlib.file_digest(input_file, "sha256").hexdigest() != sha256:
+            raise ValueError("Source changed since indexing. Rescan before copying.")
+        input_file.seek(0)
+        with new_output_file(root, relative, first_suffix=1) as (target, output):
+            shutil.copyfileobj(input_file, output, 1024 * 1024)
+            output.flush()
+            output.seek(0)
+            if hashlib.file_digest(output, "sha256").hexdigest() != sha256:
+                raise ValueError("Copy verification failed.")
+            os.utime(target if os.name == "nt" else output.fileno(), ns=(info.st_atime_ns, info.st_mtime_ns))
+    return target
 
 
 def date_metadata(image: Image.Image, path: Path, modified: float) -> tuple[str, str, str]:
@@ -157,6 +208,7 @@ def safe_segment(value: str) -> str:
 class Library:
     def __init__(self, data: Path):
         self.data = data.resolve()
+        self.data.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.thumbs = self.data / "thumbnails"
         self.thumbs.mkdir(parents=True, exist_ok=True)
         self.database = self.data / "library.sqlite3"
@@ -174,11 +226,13 @@ class Library:
                 "media_type": "TEXT NOT NULL DEFAULT 'image'",
                 "duration": "REAL NOT NULL DEFAULT 0",
                 "removed_group": "TEXT",
+                "kind_batch": "TEXT",
             }.items():
                 if name not in columns:
                     db.execute(f"ALTER TABLE photos ADD COLUMN {name} {declaration}")
             if "removed" not in {row[1] for row in db.execute("PRAGMA table_info(libraries)")}:
                 db.execute("ALTER TABLE libraries ADD COLUMN removed INTEGER NOT NULL DEFAULT 0")
+            db.execute("CREATE INDEX IF NOT EXISTS photos_category_batch ON photos(kind_batch) WHERE kind_batch IS NOT NULL")
             if "kind_source" not in columns:
                 for row in db.execute(
                     "SELECT p.id,p.filename,p.camera,p.kind,l.demo FROM photos p JOIN libraries l ON l.id=p.library_id"
@@ -209,6 +263,15 @@ class Library:
         finally:
             db.close()
 
+    @staticmethod
+    def next_catalog_id(db, table):
+        # Keep stale gallery and restore actions from targeting an unrelated reimport.
+        return db.execute(
+            f"SELECT max(COALESCE((SELECT max(id) FROM {table}),0),"
+            "COALESCE((SELECT highest_id FROM forgotten_id_limits WHERE table_name=?),0))+1",
+            (table,),
+        ).fetchone()[0]
+
     def add(self, source: str, demo: bool = False) -> int:
         path = Path(source).expanduser().resolve(strict=True)
         if not path.is_dir():
@@ -216,6 +279,7 @@ class Library:
         if not demo and (path.is_relative_to(self.data) or self.data.is_relative_to(path)):
             raise ValueError("Choose a photo folder outside Framekeep's application data.")
         with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
             for row in db.execute("SELECT id, path FROM libraries"):
                 existing = Path(row["path"])
                 if existing == path:
@@ -224,10 +288,11 @@ class Library:
                 if existing.is_relative_to(path) or path.is_relative_to(existing):
                     raise ValueError("This folder overlaps an existing library. Rescan that library instead.")
             return db.execute(
-                "INSERT INTO libraries(path,name,demo) VALUES (?,?,?)", (str(path), path.name, demo)
+                "INSERT INTO libraries(id,path,name,demo) VALUES (?,?,?,?)",
+                (self.next_catalog_id(db, "libraries"), str(path), path.name, demo),
             ).lastrowid
 
-    def scan(self, library_id: int, progress, cancelled):
+    def scan(self, library_id: int, progress, cancelled, checkpoint=None):
         with self.connect() as db:
             library = db.execute("SELECT * FROM libraries WHERE id=? AND removed=0", (library_id,)).fetchone()
         if library is None:
@@ -235,155 +300,35 @@ class Library:
         root = Path(library["path"])
         category_models = self.data / "models" / "categories"
         detect_categories = not library["demo"] and (category_models / MODEL_NAME).is_file()
-        if not root.is_dir():
-            raise ValueError("The source folder is unavailable. Reconnect your drive and try again.")
-        source_path(root, root)
-        files, traversal_errors = [], []
-
-        def walk_error(error):
-            traversal_errors.append(str(error))
-
-        for directory, folders, names in os.walk(root, followlinks=False, onerror=walk_error):
-            if cancelled():
-                return {"cancelled": True, "indexed": 0}
-            try:
-                source_path(Path(directory), root)
-            except (OSError, ValueError) as error:
-                folders.clear()
-                traversal_errors.append(str(error))
-                continue
-            safe_folders = []
-            for folder in folders:
-                try:
-                    if is_link(Path(directory) / folder):
-                        traversal_errors.append(f"Skipped linked folder: {folder}")
-                    else:
-                        safe_folders.append(folder)
-                except OSError as error:
-                    traversal_errors.append(str(error))
-            folders[:] = safe_folders
-            for name in names:
-                files.append(Path(directory) / name)
-        errors = [{"file": "Folder access", "reason": e} for e in traversal_errors]
-        seen, indexed, found, found_videos, mismatches = set(), 0, 0, 0, 0
-        skipped_media = {"videos": 0, "metadata": 0, "other": 0}
-        for number, path in enumerate(files, 1):
-            if cancelled():
-                return {"cancelled": True, "indexed": indexed, "errors": errors[:30]}
-            progress(number - 1, len(files), path.name)
-            seen.add(str(path))
-            try:
-                with open_source(path, root) as stream:
-                    stat = os.fstat(stream.fileno())
-                    kind = media_kind(stream.read(128))
-                is_video = kind == "video"
-                if kind == "metadata" or (kind == "unknown" and path.suffix.lower() not in EXTENSIONS):
-                    category = {"video": "videos", "metadata": "metadata"}.get(kind, "other")
-                    skipped_media[category] += 1
-                    with self.connect() as db:
-                        db.execute("UPDATE photos SET missing=1 WHERE path=?", (str(path),))
-                    continue
-                if not is_video and not 0 < stat.st_size <= MAX_FILE_BYTES:
-                    raise ValueError("Image exceeds the 256 MiB encoded-file limit.")
-                with self.connect() as db:
-                    existing = db.execute("SELECT * FROM photos WHERE path=?", (str(path),)).fetchone()
-                    if existing and existing["removed_group"]:
-                        continue
-                    if (
-                        existing
-                        and existing["mtime_ns"] == stat.st_mtime_ns
-                        and existing["size"] == stat.st_size
-                        and existing["policy_version"] == POLICY_VERSION
-                        and existing["media_type"] == ("video" if is_video else "image")
-                        and (is_video or (self.thumbs / f"{existing['id']}.jpg").is_file())
-                    ):
-                        db.execute("UPDATE photos SET missing=0 WHERE id=?", (existing["id"],))
-                        found_videos += is_video
-                        found += not is_video
-                        mismatches += existing["extension"].lower() != path.suffix.lstrip(".").lower()
-                        continue
-                processed = (
-                    process_video(path, root)
-                    if is_video
-                    else process_image(
-                        path, root, 480, category_models=category_models if detect_categories else None
-                    )
-                )
-                metadata = processed["metadata"]
-                if library["demo"] and metadata["kind"] not in ("Screenshots", "Animated"):
-                    metadata.update(
-                        kind="Illustrations", kind_source="sample", kind_suggestion="Illustrations"
-                    )
-                if (metadata["mtime_ns"], metadata["size"]) != (stat.st_mtime_ns, stat.st_size):
-                    raise ValueError("File changed during indexing; rescan to retry.")
-                date, source, camera = metadata["captured_at"], metadata["date_source"], metadata["camera"]
-                width, height, kind = metadata["width"], metadata["height"], metadata["kind"]
-                digest = file_hash(path, root)
-                after = path.stat()
-                if (after.st_mtime_ns, after.st_size) != (stat.st_mtime_ns, stat.st_size):
-                    raise ValueError("File changed during indexing; rescan to retry.")
-                with self.connect() as db:
-                    values = (
-                        library_id,
-                        str(path),
-                        path.name,
-                        metadata["extension"],
-                        stat.st_size,
-                        stat.st_mtime_ns,
-                        date,
-                        source,
-                        width,
-                        height,
-                        camera,
-                        kind,
-                        digest,
-                        metadata["kind_source"],
-                        metadata["kind_score"],
-                        metadata["kind_suggestion"],
-                        metadata["category_version"],
-                        "video" if is_video else "image",
-                        metadata.get("duration", 0),
-                    )
-                    db.execute(
-                        """INSERT INTO photos(library_id,path,filename,extension,size,mtime_ns,captured_at,date_source,width,height,camera,kind,sha256,kind_source,kind_score,kind_suggestion,category_version,media_type,duration)
-                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET
-                        extension=excluded.extension,size=excluded.size,mtime_ns=excluded.mtime_ns,captured_at=excluded.captured_at,
-                        media_type=excluded.media_type,duration=excluded.duration,
-                        date_source=excluded.date_source,width=excluded.width,height=excluded.height,
-                        camera=excluded.camera,
-                        kind=CASE WHEN photos.sha256=excluded.sha256 AND photos.category_version>=excluded.category_version AND photos.category_version>0 THEN photos.kind ELSE excluded.kind END,
-                        kind_source=CASE WHEN photos.sha256=excluded.sha256 AND photos.category_version>=excluded.category_version AND photos.category_version>0 THEN photos.kind_source ELSE excluded.kind_source END,
-                        kind_score=CASE WHEN photos.sha256=excluded.sha256 AND photos.category_version>=excluded.category_version AND photos.category_version>0 THEN photos.kind_score ELSE excluded.kind_score END,
-                        kind_suggestion=CASE WHEN photos.sha256=excluded.sha256 AND photos.category_version>=excluded.category_version AND photos.category_version>0 THEN photos.kind_suggestion ELSE excluded.kind_suggestion END,
-                        category_version=CASE WHEN photos.sha256=excluded.sha256 AND photos.category_version>=excluded.category_version THEN photos.category_version ELSE excluded.category_version END,
-                        kind_override=CASE WHEN photos.sha256=excluded.sha256 THEN photos.kind_override ELSE NULL END,
-                        sha256=excluded.sha256,missing=0,face_state='pending'""",
-                        values,
-                    )
-                    photo_id = db.execute("SELECT id FROM photos WHERE path=?", (str(path),)).fetchone()[0]
-                    db.execute("DELETE FROM faces WHERE photo_id=?", (photo_id,))
-                    db.execute("UPDATE photos SET policy_version=? WHERE id=?", (POLICY_VERSION, photo_id))
-                    if "live_identifier" in metadata:
-                        self.save_live_metadata(db, photo_id, digest, metadata)
-                    if not is_video:
-                        (self.thumbs / f"{photo_id}.jpg").write_bytes(processed["jpeg"])
-                        if processed.get("fingerprint"):
-                            self.save_fingerprint(db, photo_id, digest, processed["fingerprint"])
-                indexed += 1
-                found_videos += is_video
-                found += not is_video
-                mismatches += metadata["extension"].lower() != path.suffix.lstrip(".").lower()
-            except (
-                OSError,
-                ValueError,
-                UnidentifiedImageError,
-                Image.DecompressionBombError,
-                SyntaxError,
-            ) as error:
-                errors.append({"file": path.name, "reason": str(error)})
-                # A changed, unreadable file must not keep stale metadata or face matches.
-                with self.connect() as db:
-                    db.execute("UPDATE photos SET missing=1 WHERE path=?", (str(path),))
+        traversal_errors, skipped_entries = [], []
+        try:
+            if checkpoint:
+                with pinned_directory(root) as (_, descriptor):
+                    info = os.fstat(descriptor)
+                    identity = [info.st_dev, info.st_ino]
+                    scope = checkpoint.scope()
+                    if scope is None:
+                        checkpoint.save_scope(identity)
+                    elif json.loads(scope) != identity:
+                        raise ValueError("Reconnect the original source folder, or discard this task and rescan.")
+            files = list(source_entries(root, traversal_errors.append, skipped_entries.append, cancelled))
+        except FileNotFoundError:
+            raise ValueError("The source folder is unavailable. Reconnect your drive and try again.") from None
+        if cancelled():
+            return {"cancelled": True, "indexed": 0}
+        errors = [{"file": "Folder access", "reason": e} for e in traversal_errors + skipped_entries]
+        outcomes = run_items(
+            files,
+            lambda item: (str(item[0]), json.dumps([POLICY_VERSION, *file_identity(item[1])]), item[0].name),
+            lambda item: self._scan_file(item[0], root, library_id, library["demo"],
+                                         category_models if detect_categories else None, cancelled),
+            progress, cancelled, checkpoint,
+        )
+        errors.extend(outcome["error"] for outcome in outcomes if "error" in outcome)
+        indexed = sum(outcome.get("indexed", 0) for outcome in outcomes)
+        if cancelled():
+            return {"cancelled": True, "indexed": indexed, "errors": errors[:30]}
+        seen = {str(path) for path, _ in files}
         with self.connect() as db:
             # Do not mark unreadable subtrees missing after a partial directory walk.
             if not traversal_errors:
@@ -398,20 +343,198 @@ class Library:
             db.execute("DELETE FROM persons WHERE id NOT IN (SELECT person_id FROM faces)")
         progress(len(files), len(files), "Scan complete")
         self.rebuild_live_pairs(library_id)
+        media = Counter(outcome.get("media") for outcome in outcomes)
+        skipped = Counter(outcome.get("skipped") for outcome in outcomes)
         return {
+            "library_id": library_id,
             "indexed": indexed,
-            "found": found,
-            "videos": found_videos,
-            "media_total": found + found_videos,
+            "found": media["photo"],
+            "videos": media["video"],
+            "media_total": media["photo"] + media["video"],
             "scanned_files": len(files),
-            "extension_mismatches": mismatches,
-            "skipped_media": skipped_media,
+            "extension_mismatches": sum(outcome.get("mismatch", False) for outcome in outcomes),
+            "skipped_media": {name: skipped[name] for name in ("videos", "metadata", "other")},
             "error_count": len(errors),
             "errors": errors[:30],
+            "jpeg_recovery": {"library_id": library_id,
+                              "files": [outcome["recovery"] for outcome in outcomes if "recovery" in outcome]},
         }
+
+    def _scan_file(self, path, root, library_id, demo, category_models, cancelled):
+        try:
+            with open_source(path, root) as stream:
+                stat = os.fstat(stream.fileno())
+                kind = media_kind(stream.read(128))
+            is_video = kind == "video"
+            if kind == "metadata" or (kind == "unknown" and path.suffix.lower() not in EXTENSIONS):
+                category = {"video": "videos", "metadata": "metadata"}.get(kind, "other")
+                with self.connect() as db:
+                    db.execute("UPDATE photos SET missing=1 WHERE path=?", (str(path),))
+                return {"skipped": category}
+            if not is_video and not 0 < stat.st_size <= MAX_FILE_BYTES:
+                raise ValueError("Image exceeds the 256 MiB encoded-file limit.")
+            with self.connect() as db:
+                existing = db.execute("SELECT * FROM photos WHERE path=?", (str(path),)).fetchone()
+                if existing and existing["removed_group"]:
+                    return {}
+                if (
+                    existing
+                    and existing["mtime_ns"] == stat.st_mtime_ns
+                    and existing["size"] == stat.st_size
+                    and existing["policy_version"] == POLICY_VERSION
+                    and existing["media_type"] == ("video" if is_video else "image")
+                    and (is_video or (self.thumbs / f"{existing['id']}.jpg").is_file())
+                ):
+                    db.execute("UPDATE photos SET missing=0 WHERE id=?", (existing["id"],))
+                    return {"media": "video" if is_video else "photo",
+                            "mismatch": existing["extension"].lower() != path.suffix.lstrip(".").lower()}
+            expected = file_identity(stat)
+            with open_source(path, root) as stream:
+                require_file_identity(stream, expected)
+                processed = (
+                    process_video(path, root, expected=expected)
+                    if is_video
+                    else process_image(
+                        path, root, 480, category_models=category_models,
+                        expected=expected,
+                    )
+                )
+                digest = scan_hash(stream, stat, cancelled)
+                if digest is None:
+                    return None
+                with open_source(path, root) as current_file:
+                    require_file_identity(current_file, expected)
+            metadata = processed["metadata"]
+            if demo and metadata["kind"] not in ("Screenshots", "Animated"):
+                metadata.update(
+                    kind="Illustrations", kind_source="sample", kind_suggestion="Illustrations"
+                )
+            if (metadata["mtime_ns"], metadata["size"]) != (stat.st_mtime_ns, stat.st_size):
+                raise ValueError("File changed during indexing; rescan to retry.")
+            date, source, camera = metadata["captured_at"], metadata["date_source"], metadata["camera"]
+            width, height, kind = metadata["width"], metadata["height"], metadata["kind"]
+            with self.connect() as db:
+                db.execute("BEGIN IMMEDIATE")
+                current = db.execute("SELECT id FROM photos WHERE path=?", (str(path),)).fetchone()
+                photo_id = current["id"] if current else self.next_catalog_id(db, "photos")
+                values = (
+                    photo_id,
+                    library_id,
+                    str(path),
+                    path.name,
+                    metadata["extension"],
+                    stat.st_size,
+                    stat.st_mtime_ns,
+                    date,
+                    source,
+                    width,
+                    height,
+                    camera,
+                    kind,
+                    digest,
+                    metadata["kind_source"],
+                    metadata["kind_score"],
+                    metadata["kind_suggestion"],
+                    metadata["category_version"],
+                    "video" if is_video else "image",
+                    metadata.get("duration", 0),
+                )
+                db.execute(
+                    """INSERT INTO photos(id,library_id,path,filename,extension,size,mtime_ns,captured_at,date_source,width,height,camera,kind,sha256,kind_source,kind_score,kind_suggestion,category_version,media_type,duration)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET
+                    extension=excluded.extension,size=excluded.size,mtime_ns=excluded.mtime_ns,captured_at=excluded.captured_at,
+                    media_type=excluded.media_type,duration=excluded.duration,
+                    date_source=excluded.date_source,width=excluded.width,height=excluded.height,
+                    camera=excluded.camera,
+                    kind=CASE WHEN photos.sha256=excluded.sha256 AND photos.category_version>=excluded.category_version AND photos.category_version>0 THEN photos.kind ELSE excluded.kind END,
+                    kind_source=CASE WHEN photos.sha256=excluded.sha256 AND photos.category_version>=excluded.category_version AND photos.category_version>0 THEN photos.kind_source ELSE excluded.kind_source END,
+                    kind_score=CASE WHEN photos.sha256=excluded.sha256 AND photos.category_version>=excluded.category_version AND photos.category_version>0 THEN photos.kind_score ELSE excluded.kind_score END,
+                    kind_suggestion=CASE WHEN photos.sha256=excluded.sha256 AND photos.category_version>=excluded.category_version AND photos.category_version>0 THEN photos.kind_suggestion ELSE excluded.kind_suggestion END,
+                    category_version=CASE WHEN photos.sha256=excluded.sha256 AND photos.category_version>=excluded.category_version THEN photos.category_version ELSE excluded.category_version END,
+                    kind_override=CASE WHEN photos.sha256=excluded.sha256 THEN photos.kind_override ELSE NULL END,
+                    kind_batch=CASE WHEN photos.sha256=excluded.sha256 THEN photos.kind_batch ELSE NULL END,
+                    sha256=excluded.sha256,missing=0,face_state='pending'""",
+                    values,
+                )
+                db.execute("DELETE FROM faces WHERE photo_id=?", (photo_id,))
+                db.execute("UPDATE photos SET policy_version=? WHERE id=?", (POLICY_VERSION, photo_id))
+                if "live_identifier" in metadata:
+                    self.save_live_metadata(db, photo_id, digest, metadata)
+                if not is_video:
+                    self._save_thumbnail(photo_id, processed["jpeg"])
+                    if processed.get("fingerprint"):
+                        self.save_fingerprint(db, photo_id, digest, processed["fingerprint"])
+            return {"indexed": 1, "media": "video" if is_video else "photo",
+                    "mismatch": metadata["extension"].lower() != path.suffix.lstrip(".").lower()}
+        except (
+            OSError,
+            ValueError,
+            UnidentifiedImageError,
+            Image.DecompressionBombError,
+            SyntaxError,
+        ) as error:
+            outcome = {"error": {"file": path.name, "reason": str(error)}}
+            if isinstance(error, TruncatedJPEGError):
+                try:
+                    with open_source(path, root) as stream:
+                        current = os.fstat(stream.fileno())
+                        if file_identity(current) == file_identity(stat):
+                            digest = scan_hash(stream, current, cancelled)
+                            if digest is None:
+                                return None
+                            outcome["recovery"] = {
+                                "path": str(path), "size": current.st_size, "mtime_ns": current.st_mtime_ns,
+                                "sha256": digest,
+                            }
+                except (OSError, ValueError):
+                    pass  # A changed or unavailable file can be checked again on the next scan.
+            # A changed, unreadable file must not keep stale metadata or face matches.
+            with self.connect() as db:
+                db.execute("UPDATE photos SET missing=1 WHERE path=?", (str(path),))
+            return outcome
+
+    def _save_thumbnail(self, photo_id, jpeg):
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=self.thumbs, suffix=".tmp", delete=False) as stream:
+                temporary = Path(stream.name)
+                stream.write(jpeg)
+            temporary.replace(self.thumbs / f"{photo_id}.jpg")
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+
+    def analysis_rows(self, filters, checkpoint, limit=None):
+        scope = checkpoint.scope() if checkpoint else None
+        if scope is None:
+            rows = self.photos(filters, limit)["photos"]
+            if checkpoint:
+                checkpoint.save_scope([row["id"] for row in rows])
+            return rows
+        with self.connect() as db:
+            return [dict(row) for row in db.execute(
+                "SELECT p.*,l.path AS source_root FROM json_each(?) work JOIN photos p ON p.id=work.value "
+                "JOIN libraries l ON l.id=p.library_id WHERE p.missing=0 AND l.removed=0 ORDER BY work.key", (scope,)
+            )]
+
+    @staticmethod
+    def check_analysis_sources(rows):
+        for source in sorted({row["source_root"] for row in rows}):
+            try:
+                with pinned_directory(Path(source)):
+                    pass
+            except (OSError, ValueError):
+                raise ValueError(f"Reconnect the source folder {source} before resuming.") from None
 
     def where(self, filters: dict):
         terms, args = ["p.missing=0"], []
+        if filters.get("pending_faces"):
+            terms.append("p.face_state='pending'")
+        if filters.get("pending_categories") == "new":
+            terms.append("p.kind_override IS NULL AND p.category_version=0 AND p.kind_source='pending'")
+        elif filters.get("pending_categories") == "older":
+            terms.append("p.kind_override IS NULL AND p.kind_source='uncertain' AND p.category_version<?")
+            args.append(MODEL_VERSION)
         if filters.get("collapse_live"):
             terms.append("NOT EXISTS (SELECT 1 FROM live_photo_pairs lp JOIN photos s ON s.id=lp.still_id "
                          "WHERE lp.motion_id=p.id AND lp.motion_sha=p.sha256 AND lp.still_sha=s.sha256 AND s.missing=0)")
@@ -583,7 +706,7 @@ class Library:
                         [*args, kind],
                     )
                 ]
-        order = ("Photos", "Screenshots", "Illustrations", "Videos", "Needs review", "Animated")
+        order = ("Photos", "Screenshots", "Illustrations", "Downloads", "Videos", "Needs review", "Animated")
         albums = sorted(
             grouped.values(),
             key=lambda album: (
@@ -725,6 +848,65 @@ class Library:
                 "GROUP BY p.removed_group ORDER BY min(p.id) DESC LIMIT ? OFFSET ?", (limit, offset))]
         return {"sources": sources, "photos": rows, "total": total, "offset": offset, "limit": limit}
 
+    def forget_removed(self, item_id: int, *, source: bool = False):
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if source:
+                if not db.execute("SELECT 1 FROM libraries WHERE id=? AND removed=1", (item_id,)).fetchone():
+                    raise ValueError("This folder is no longer in Removed items.")
+                selection, key = "library_id=?", item_id
+            else:
+                item = db.execute(
+                    "SELECT p.removed_group FROM photos p JOIN libraries l ON l.id=p.library_id "
+                    "WHERE p.id=? AND p.removed_group IS NOT NULL AND p.missing=1 AND l.removed=0",
+                    (item_id,),
+                ).fetchone()
+                if item is None:
+                    raise ValueError("This file is no longer in Removed items.")
+                selection, key = "removed_group=?", item["removed_group"]
+
+            selected_photos = f"SELECT id FROM photos WHERE {selection}"
+            photo_ids = [row[0] for row in db.execute(selected_photos, (key,))]
+            faces = db.execute(
+                f"SELECT id,person_id FROM faces WHERE photo_id IN ({selected_photos})", (key,)
+            ).fetchall()
+            db.execute(f"DELETE FROM photos WHERE {selection}", (key,))
+            db.executemany(
+                "DELETE FROM persons WHERE id=? AND NOT EXISTS (SELECT 1 FROM faces WHERE person_id=persons.id)",
+                [(person_id,) for person_id in {face["person_id"] for face in faces}],
+            )
+            if source:
+                db.execute("DELETE FROM libraries WHERE id=?", (item_id,))
+
+            limits = []
+            if photo_ids:
+                limits.append(("photos", max(photo_ids)))
+            if source:
+                limits.append(("libraries", item_id))
+            db.executemany(
+                "INSERT INTO forgotten_id_limits VALUES (?,?) ON CONFLICT(table_name) "
+                "DO UPDATE SET highest_id=max(highest_id,excluded.highest_id)", limits,
+            )
+
+        self.invalidate_plans()
+        skipped = 0
+        face_ids = [face["id"] for face in faces]
+        for directory, ids in (("thumbnails", photo_ids), ("faces", face_ids)):
+            if not ids:
+                continue
+            try:
+                with output_directory(self.data, Path(directory)) as folder:
+                    if folder != self.data / directory:
+                        raise ValueError("Preview cache moved outside application data.")
+                    for preview_id in ids:
+                        try:
+                            (folder / f"{preview_id}.jpg").unlink(missing_ok=True)
+                        except OSError:
+                            skipped += 1
+            except (OSError, ValueError):
+                skipped += len(ids)
+        return {"forgotten": len(photo_ids), "skipped_previews": skipped}
+
     def restore_library(self, library_id):
         with self.connect() as db:
             row = db.execute("SELECT path,demo FROM libraries WHERE id=? AND removed=1", (library_id,)).fetchone()
@@ -752,27 +934,41 @@ class Library:
             raise ValueError("Select between 1 and 5,000 photos.")
         placeholders = ",".join("?" for _ in ids)
         with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
             count = db.execute(
                 f"SELECT count(*) FROM photos WHERE missing=0 AND media_type='image' AND id IN ({placeholders})",
                 ids,
             ).fetchone()[0]
             if count != len(ids):
                 raise ValueError("A selected photo is unavailable. Refresh the gallery.")
-            db.execute(f"UPDATE photos SET kind_override=? WHERE id IN ({placeholders})", [kind, *ids])
+            db.execute(f"UPDATE photos SET kind_override=?,kind_batch=NULL WHERE id IN ({placeholders})", [kind, *ids])
         return {"updated": count}
 
-    def output_folder(self, destination: str):
+    def output_folder(self, destination: str, *, allow_source_children: bool = False):
         destination = Path(destination).expanduser().resolve(strict=True)
         if not destination.is_dir():
             raise ValueError("Choose an existing output folder.")
+        self._validate_output_location(destination, allow_source_children=allow_source_children)
+        return destination
+
+    def recovery_output_folder(self, destination: str) -> Path:
+        default = recovery_directory()
+        if destination.strip() and Path(destination).expanduser() != default:
+            return self.output_folder(destination, allow_source_children=True)
+
+        home = default.parent.resolve(strict=True)
+        self._validate_output_location(home / default.name, allow_source_children=True)
+        with output_directory(home, Path(default.name)) as folder:
+            return folder
+
+    def _validate_output_location(self, destination: Path, *, allow_source_children: bool):
         if destination.is_relative_to(self.data) or self.data.is_relative_to(destination):
             raise ValueError("Choose an output folder outside application data.")
         with self.connect() as db:
             for row in db.execute("SELECT path FROM libraries"):
                 source = Path(row[0])
-                if destination.is_relative_to(source) or source.is_relative_to(destination):
+                if destination.is_relative_to(source) or (not allow_source_children and source.is_relative_to(destination)):
                     raise ValueError("Choose an output folder separate from your source libraries.")
-        return destination
 
     def organization_units(self, rows):
         """A selected Live Photo always includes both original resources."""
@@ -801,6 +997,7 @@ class Library:
         create_run_folder: bool = True,
     ):
         destination = self.output_folder(destination)
+        approved = ApprovedOutput.inspect(destination)
         with self.connect() as db:
             names = {row["id"]: row["name"] for row in db.execute("SELECT * FROM persons")}
         rows = self.photos(filters, limit=None)["photos"]
@@ -849,6 +1046,7 @@ class Library:
         plan = {
             "token": token,
             "destination": str(destination),
+            "approved_output": approved,
             "entries": entries,
             "skipped": skipped,
             "bytes": sum(e["size"] for e in entries),
@@ -882,27 +1080,23 @@ class Library:
 
     def export(self, plan: dict, progress, cancelled):
         # A unique run folder plus exclusive file creation prevents overwriting any existing file.
-        root = self.output_folder(plan["destination"])
-        if not root.is_dir():
-            raise ValueError("The output folder is unavailable.")
-        if shutil.disk_usage(root).free < plan["bytes"] + 5 * 1024 * 1024:
-            raise ValueError("There is not enough free space for these copies.")
+        approved = plan["approved_output"]
         identifier = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
         nested = plan.get("create_run_folder", True)
-        run = root / ("Framekeep-" + identifier) if nested else root
         copied = copied_photos = copied_videos = 0
         errors = []
         manifest_name = "manifest.csv" if nested else "Framekeep-manifest-" + identifier + ".csv"
-        with output_directory(root):
-            if nested:
-                run.mkdir(exist_ok=False)
-            with output_directory(run):
+        with output_directory(approved) as root:
+            self._validate_output_location(root, allow_source_children=False)
+            if shutil.disk_usage(root).free < plan["bytes"] + 5 * 1024 * 1024:
+                raise ValueError("There is not enough free space for these copies.")
+            run_folder = new_output_folder(approved, "Framekeep-" + identifier) if nested else approved
+            with output_directory(run_folder) as run:
                 if plan["layout"] == "kind_date":
                     for folder in CATEGORY_FOLDERS.values():
-                        with output_directory(run, Path(folder)):
+                        with output_directory(run_folder, Path(folder)):
                             pass
-                with (run / manifest_name).open("x", newline="", encoding="utf-8-sig") as manifest:
-                    check_output_stream(manifest, run / manifest_name)
+                with new_output_file(run_folder, Path(manifest_name), csv_text=True) as (_, manifest):
                     writer = csv.writer(manifest)
                     writer.writerow(["source", "copy", "sha256", "status"])
                     for i, entry in enumerate(plan["entries"]):
@@ -911,38 +1105,9 @@ class Library:
                         progress(i, len(plan["entries"]), Path(entry["source"]).name)
                         source, relative = Path(entry["source"]), Path(entry["relative"])
                         try:
-                            with open_source(source, Path(entry["source_root"])) as input_file:
-                                source_info = os.fstat(input_file.fileno())
-                                digest = hashlib.sha256()
-                                for block in iter(lambda: input_file.read(1024 * 1024), b""):
-                                    digest.update(block)
-                                if digest.hexdigest() != entry["sha256"]:
-                                    raise ValueError("Source changed since indexing. Rescan before copying.")
-                                input_file.seek(0)
-                                with output_directory(run, relative.parent) as parent:
-                                    original = parent / relative.name
-                                    target, suffix = original, 1
-                                    while True:
-                                        try:
-                                            output = target.open("xb")
-                                            break
-                                        except FileExistsError:
-                                            target = original.with_name(
-                                                f"{original.stem} ({suffix}){original.suffix}"
-                                            )
-                                            suffix += 1
-                                    try:
-                                        with output:
-                                            check_output_stream(output, target)
-                                            shutil.copyfileobj(input_file, output, 1024 * 1024)
-                                        if file_hash(target, run) != entry["sha256"]:
-                                            raise ValueError("Copy verification failed.")
-                                        os.utime(
-                                            target, ns=(source_info.st_atime_ns, source_info.st_mtime_ns)
-                                        )
-                                    except BaseException:
-                                        target.unlink(missing_ok=True)
-                                        raise
+                            target = copy_verified_original(
+                                source, Path(entry["source_root"]), entry["sha256"], run_folder, relative,
+                            )
                             copied += 1
                             copied_videos += entry.get("media_type") == "video"
                             copied_photos += entry.get("media_type", "image") == "image"

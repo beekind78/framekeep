@@ -76,6 +76,33 @@ def test_manual_category_is_reset_for_replaced_content_and_bulk_is_atomic(tmp_pa
     assert library.photo(row["id"])["kind"] == "Needs review"
 
 
+def test_downloads_category_single_and_bulk_assignment_album_and_export(tmp_path):
+    library, _, source = indexed_library(tmp_path)
+    first, second = [row["id"] for row in library.photos({}, None)["photos"]]
+    originals = {path.name: file_hash(path) for path in source.iterdir()}
+    app = create_app(library.data)
+    with TestClient(app, base_url="http://127.0.0.1") as client:
+        token = client.post("/api/bootstrap", json={"ticket": app.state.access.ticket()}).json()["token"]
+        headers = {"X-Framekeep-Token": token}
+        assert client.patch(f"/api/photos/{first}", headers=headers, json={"kind": "Downloads"}).status_code == 200
+        response = client.post("/api/categories/assign", headers=headers, json={"ids": [first, second], "kind": "Downloads"})
+        assert response.status_code == 200
+        rows = client.get("/api/photos?kind=Downloads", headers=headers).json()["photos"]
+        assert {row["id"] for row in rows} == {first, second}
+        assert all(row["automatic_kind"] == "Needs review" for row in rows)
+        albums = client.get("/api/albums", headers=headers).json()["albums"]
+        assert [(album["kind"], album["count"]) for album in albums] == [("Downloads", 2)]
+
+    output = tmp_path / "output"
+    output.mkdir()
+    preview = library.plan(str(output), "kind_date", {"kind": "Downloads"}, False, create_run_folder=False)
+    assert all(Path(path).parts[0] == "Downloads" for path in preview["sample"])
+    result = library.export(library.consume_plan(preview["token"]), lambda *args: None, lambda: False)
+    assert result["copied"] == 2 and result["error_count"] == 0
+    assert {path.name: file_hash(path) for path in (output / "Downloads").rglob("*.jpg")} == originals
+    assert {path.name: file_hash(path) for path in source.iterdir()} == originals
+
+
 def test_detection_keeps_manual_categories_and_skips_current_predictions(tmp_path, monkeypatch):
     library, _, _ = indexed_library(tmp_path)
     rows = library.photos({}, None)["photos"]
@@ -113,7 +140,7 @@ def test_uncertain_or_invalid_predictions_are_not_confident_labels():
     labels = ["Photos", "Screenshots", "Illustrations"]
     result = decide_category([0.25, 0.251, 0.24], labels)
     assert result["kind"] == "Needs review" and result["kind_suggestion"] == "Screenshots"
-    assert decide_category([0.1, 0.05, 0.03], labels)["kind"] == "Needs review"
+    assert decide_category([0.07, 0.04, 0.03], labels)["kind"] == "Needs review"
     assert decide_category([0.32, 0.2, 0.22], labels)["kind"] == "Photos"
     with pytest.raises(ValueError):
         decide_category([float("nan"), 0.2, 0.3], labels)

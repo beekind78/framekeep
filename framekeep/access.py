@@ -18,7 +18,7 @@ from pathlib import Path
 
 from .paths import runtime_directory
 
-VERSION = "1.13.0"
+VERSION = "1.14.0"
 TICKET_TTL = 60
 SESSION_TTL = 12 * 60 * 60
 

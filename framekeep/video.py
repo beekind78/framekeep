@@ -3,7 +3,6 @@
 import json
 import os
 import re
-import shutil
 import signal
 import subprocess
 import sys
@@ -15,11 +14,12 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from .image_processing import _worker_command, process_video_thumbnail
+from .paths import ffmpeg_executable
 from .source_files import open_source, source_path
 from .video_policy import MAX_DURATION, MAX_INPUT, MAX_OUTPUT, WALL_SECONDS
 
 CACHE_BUDGET = 512 * 1024**2
-CACHE_NAME = re.compile(r"[0-9a-f]{64}-v1\.mp4\Z")
+CACHE_NAME = re.compile(r"[0-9a-f]{64}(?:-4k)?-v1\.mp4\Z")
 THUMBNAIL_BUDGET = 64 * 1024**2
 THUMBNAIL_NAME = re.compile(r"[0-9a-f]{64}-v1\.jpg\Z")
 MAX_THUMBNAIL = 512 * 1024
@@ -27,7 +27,8 @@ MAX_THUMBNAIL = 512 * 1024
 
 def prepare_video(photo, ffmpeg, target, cancelled):
     request = {key: photo[key] for key in ("path", "sha256", "size", "mtime_ns")}
-    request.update(root=photo["source_root"], ffmpeg=ffmpeg, target=str(target))
+    request.update(root=photo["source_root"], ffmpeg=ffmpeg, target=str(target),
+                   quality=photo.get("playback_quality", "720p"))
     flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
     with subprocess.Popen(_worker_command("video_worker.py"), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, creationflags=flags, start_new_session=sys.platform != "win32",
@@ -81,7 +82,7 @@ class Video:
 
     @staticmethod
     def ready():
-        return shutil.which("ffmpeg") is not None
+        return ffmpeg_executable() is not None
 
     def _source(self, photo_id, *, playback=True):
         photo = self.library.photo(photo_id)
@@ -108,7 +109,7 @@ class Video:
                     data = stream.read(MAX_THUMBNAIL + 1)
                 if data.startswith(b"\xff\xd8\xff") and 0 < len(data) < MAX_THUMBNAIL:
                     return data
-            ffmpeg = shutil.which("ffmpeg")
+            ffmpeg = ffmpeg_executable()
             if not ffmpeg:
                 raise ValueError("Install FFmpeg and reopen Framekeep to generate video thumbnails.")
             data = process_video_thumbnail(photo, ffmpeg)
@@ -126,11 +127,12 @@ class Video:
             self._trim_cache(self.thumbnails, target, THUMBNAIL_BUDGET, THUMBNAIL_NAME)
             return data
 
-    def _target(self, photo):
-        return self.folder / (photo["sha256"] + "-v1.mp4")
+    def _target(self, photo, quality="720p"):
+        suffix = "-4k-v1.mp4" if quality == "4k" else "-v1.mp4"
+        return self.folder / (photo["sha256"] + suffix)
 
-    def _cached(self, photo):
-        target = self._target(photo)
+    def _cached(self, photo, quality="720p"):
+        target = self._target(photo, quality)
         if not target.exists():
             return None
         with open_source(target, self.folder) as stream:
@@ -138,31 +140,32 @@ class Video:
                 return None
         return target
 
-    def prepare(self, photo_id):
+    def prepare(self, photo_id, quality="720p"):
         photo = self._source(photo_id)
         with self.lock:
             if self.closed:
                 raise ValueError("Framekeep is closing.")
-            if self._cached(photo):
-                return {"state": "ready", "id": None}
+            if self._cached(photo, quality):
+                return {"state": "ready", "id": None, "quality": quality}
             if self.current and self.current["state"] == "preparing":
-                if self.current["photo_id"] == photo_id and not self.stop.is_set():
+                if (self.current["photo_id"], self.current["quality"]) == (photo_id, quality) and not self.stop.is_set():
                     return dict(self.current)
                 raise ValueError("Another video is being prepared. Try Play video again in a moment.")
-            ffmpeg = shutil.which("ffmpeg")
+            ffmpeg = ffmpeg_executable()
             if not ffmpeg:
                 raise ValueError("Install FFmpeg and reopen Framekeep for in-app playback. You can still open the original.")
             self.stop.clear()
             job_id = uuid.uuid4().hex
-            self.current = {"id": job_id, "photo_id": photo_id, "state": "preparing", "message": "Preparing full video locally…"}
-            self.executor.submit(self._prepare, photo, ffmpeg, job_id)
+            self.current = {"id": job_id, "photo_id": photo_id, "quality": quality,
+                            "state": "preparing", "message": "Preparing full video locally…"}
+            self.executor.submit(self._prepare, photo, ffmpeg, job_id, quality)
             return dict(self.current)
 
-    def _prepare(self, photo, ffmpeg, job_id):
+    def _prepare(self, photo, ffmpeg, job_id, quality):
         try:
             with tempfile.TemporaryDirectory(prefix="prepare-", dir=self.folder) as work:
                 target = Path(work) / "playback.mp4"
-                prepare_video(photo, ffmpeg, target, self.stop.is_set)
+                prepare_video({**photo, "playback_quality": quality}, ffmpeg, target, self.stop.is_set)
                 if self.stop.is_set():
                     raise ValueError("Playback preparation cancelled.")
                 self._source(photo["id"])
@@ -171,8 +174,9 @@ class Video:
                 with self.lock:
                     if self.stop.is_set():
                         raise ValueError("Playback preparation cancelled.")
-                    target.replace(self._target(photo))
-                    self._trim(self._target(photo))
+                    cache = self._target(photo, quality)
+                    target.replace(cache)
+                    self._trim(cache)
             state, message = "ready", "Full video ready."
         except Exception as error:  # noqa: BLE001 -- background task boundary
             state, message = "cancelled" if self.stop.is_set() else "failed", str(error)[:400]
@@ -213,10 +217,10 @@ class Video:
                 self.stop.set()
         return {"ok": True}
 
-    def file(self, photo_id):
+    def file(self, photo_id, quality="720p"):
         photo = self._source(photo_id)
         with self.lock:
-            target = self._cached(photo)
+            target = self._cached(photo, quality)
             if not target:
                 raise ValueError("Press Play video to prepare this video first.")
             return target

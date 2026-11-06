@@ -41,10 +41,10 @@ function showContextMenu(target, x, y) {
   const count = item.ids?.length || 0, multiple = count > 1;
   const title = item.type === 'source' ? item.value.name : multiple ? number(count) + ' selected items' : item.value.filename;
   const options = item.type === 'source'
-    ? action('open-source', 'Open in Framekeep', 'folder') + action('rescan', 'Rescan folder', 'refresh') + action('reveal-source', 'Show folder in Explorer', 'folder')
+    ? action('open-source', 'Open in Framekeep', 'folder') + action('copy-source-name', 'Copy folder name', 'copy') + action('rescan', 'Rescan folder', 'refresh') + action('reveal-source', 'Show folder in Explorer', 'folder')
     : multiple
-      ? action('copy-files', 'Copy ' + number(count) + ' selected items', 'copy') + action('copy-path', 'Copy selected file paths', 'copy') + action('copy-folder', 'Copy selected to folder…', 'folder')
-      : action('open', 'Open', 'photo') + action('copy-files', item.value.live_motion_id || item.value.live_still_id ? 'Copy original files (Live Photo)' : 'Copy original file', 'copy') + action('copy-path', 'Copy file path', 'copy') + action('copy-folder', 'Copy to folder…', 'folder') + '<hr>' + action('edit-image', 'Edit image copy…', 'sliders', item.value.media_type !== 'image') + action('edit-details', 'Edit tags / category…', 'sliders') + action('favorite', item.value.favorite ? 'Remove from favorites' : 'Add to favorites', 'heart') + action('reveal', 'Show original in folder', 'folder');
+      ? action('copy-files', 'Copy ' + number(count) + ' selected items', 'copy') + action('copy-name', 'Copy selected file names', 'copy') + action('copy-path', 'Copy selected file paths', 'copy') + action('copy-folder', 'Copy selected to folder…', 'folder')
+      : action('open', 'Open', 'photo') + action('copy-files', item.value.live_motion_id || item.value.live_still_id ? 'Copy original files (Live Photo)' : 'Copy original file', 'copy') + action('copy-name', 'Copy file name', 'copy') + action('copy-path', 'Copy file path', 'copy') + action('copy-folder', 'Copy to folder…', 'folder') + '<hr>' + action('edit-image', 'Edit image copy…', 'sliders', item.value.media_type !== 'image') + (canRepairPhoto(item.value) ? action('repair-photo', 'Repair photo…', 'spark') : '') + action('edit-details', 'Edit tags / category…', 'sliders') + action('favorite', item.value.favorite ? 'Remove from favorites' : 'Add to favorites', 'heart') + action('reveal', 'Show original in folder', 'folder');
   contextMenu.innerHTML = '<div class="context-title">' + esc(title) + '</div>' + options + '<hr>' + action('remove', item.type === 'source' ? 'Remove folder from Framekeep…' : multiple ? 'Remove ' + number(count) + ' selected from Framekeep…' : 'Remove from Framekeep…', 'close');
   contextMenu.showPopover();
   const rect = contextMenu.getBoundingClientRect();
@@ -82,6 +82,7 @@ document.addEventListener('keydown', async event => {
   const command = (event.ctrlKey || event.metaKey) && !event.shiftKey;
   const key = event.key.toLowerCase();
   const selectAll = command && key === 'a', copy = command && key === 'c';
+  if (copy && hasCopyableSelection()) return;
   const remove = key === 'delete' && !event.ctrlKey && !event.metaKey && !event.shiftKey;
   if ((!selectAll && !copy && !remove) || !galleryOrder().length) return;
   if (!selectAll && !state.selected.size) return;
@@ -105,11 +106,39 @@ function confirmRemoval(item) {
   modal('Remove from Framekeep?', '<p><strong>' + esc(name) + '</strong> will be removed from your Framekeep view. Original files and folders stay in File Explorer.</p>' + names + '<p>' + (item.type === 'source' ? 'Its photo categories, tags and people matches are kept for when you restore the source.' : multiple ? 'Your tags and categories are kept. Live Photos include both original resources; each item can be restored later.' : item.value.live_motion_id || item.value.live_still_id ? 'Both parts of this Live Photo will stay together when removed or restored.' : 'Your tags and category are kept.') + ' Use Removed items in the sidebar to restore later.</p>' + actions('confirm-context-remove', multiple ? 'Remove ' + number(item.ids.length) + ' selected items' : 'Remove from Framekeep'));
 }
 
+function removedRow(row, type, offset) {
+  const folder = type === 'source';
+  const detail = '<span data-copyable>' + esc(folder ? row.path : row.source) + '</span>'
+    + (!folder && row.files > 1 ? ' · ' + row.files + ' Live Photo files' : '');
+  return '<div class="removed-row"><div><strong data-copyable>' + esc(folder ? row.name : row.filename) + '</strong><small>' + detail + '</small></div>'
+    + '<div class="removed-row-actions"><button class="button outline" data-restore-' + type + '="' + row.id + '">' + (folder ? 'Restore folder' : 'Restore') + '</button>'
+    + '<button class="button outline forget-action" data-forget-id="' + row.id + '" data-forget-type="' + type + '" data-forget-page="' + offset + '">Forget from Framekeep</button></div></div>';
+}
+
 async function showRemoved(offset = 0) {
-  const data = await api('/removed?offset=' + offset);
-  const sourceRows = data.sources.map(row => '<div class="removed-row"><div><strong>' + esc(row.name) + '</strong><small>' + esc(row.path) + '</small></div><button class="button outline" data-restore-source="' + row.id + '">Restore folder</button></div>').join('');
-  const photoRows = data.photos.map(row => '<div class="removed-row"><div><strong>' + esc(row.filename) + '</strong><small>' + esc(row.source) + (row.files > 1 ? ' · ' + row.files + ' Live Photo files' : '') + '</small></div><button class="button outline" data-restore-photo="' + row.id + '">Restore</button></div>').join('');
+  let data = await api('/removed?offset=' + offset);
+  if (offset && offset >= data.total) {
+    offset = Math.floor(Math.max(0, data.total - 1) / data.limit) * data.limit;
+    data = await api('/removed?offset=' + offset);
+  }
+  const sourceRows = data.sources.map(row => removedRow(row, 'source', offset)).join('');
+  const photoRows = data.photos.map(row => removedRow(row, 'photo', offset)).join('');
   modal('Removed from Framekeep', '<p>Original files stay where they are. Restoring reconnects the source and rescans it; your saved tags, categories and people matches are kept.</p>' + (sourceRows ? '<h3>Source folders</h3>' + sourceRows : '') + (photoRows ? '<h3>Photos & videos</h3>' + photoRows : '') + (!sourceRows && !photoRows ? '<p>No removed items.</p>' : '') + '<div class="modal-actions">' + (offset ? '<button class="button outline" data-removed-page="' + Math.max(0, offset - data.limit) + '">Previous</button>' : '') + (offset + data.photos.length < data.total ? '<button class="button outline" data-removed-page="' + (offset + data.limit) + '">Next</button>' : '') + '<button class="button primary" data-action="close-modal">Done</button></div>');
+}
+
+function confirmForget(button) {
+  const {forgetId, forgetType, forgetPage} = button.dataset;
+  const name = button.closest('.removed-row').querySelector('strong').textContent;
+  const folder = forgetType === 'source';
+  const scope = folder ? 'this folder and its items' : 'this item, including both parts of a Live Photo';
+  const returnHint = folder ? 'Adding this folder again creates a fresh catalog.' : 'A later scan can add the original again as a new item.';
+  modal('Forget from Framekeep?', '<p><strong>' + esc(name) + '</strong></p>'
+    + '<p>Framekeep will permanently clear the catalog records and saved details for ' + scope + '. You can still open the originals in File Explorer.</p>'
+    + '<p>' + returnHint + '</p><div class="modal-actions">'
+    + '<button class="button outline" id="cancel-forget" data-removed-page="' + forgetPage + '">Cancel</button>'
+    + '<button class="button primary forget-confirm" data-confirm-forget="' + forgetId + '" data-forget-type="' + forgetType
+    + '" data-forget-page="' + forgetPage + '">Forget from Framekeep</button></div>');
+  $('#cancel-forget').focus();
 }
 
 async function contextAction(action, item) {
@@ -118,13 +147,16 @@ async function contextAction(action, item) {
   switch (action) {
     case 'open': return openPhoto(id);
     case 'copy-files': {const result = await post('/photos/clipboard', {ids:item.ids, mode:'files'}); return toast(result.copied + ' original file(s) copied. Paste in File Explorer.');}
+    case 'copy-name': await post('/photos/clipboard', {ids:item.ids, mode:'name'}); return toast(item.ids.length > 1 ? 'Selected file names copied.' : 'File name copied.');
     case 'copy-path': await post('/photos/clipboard', {ids:item.ids, mode:'path'}); return toast(item.ids.length > 1 ? 'Selected file paths copied.' : 'File path copied.');
     case 'copy-folder': state.selected = new Set(item.ids); selectionUI(); return organize();
     case 'edit-details': openPhoto(id); $('#photo-tags').focus(); return $('#photo-tags').scrollIntoView({block:'center'});
     case 'edit-image': return editImage(photo);
+    case 'repair-photo': return startPhotoRepair(id);
     case 'favorite': return favorite(id, $('#photo-modal').open);
     case 'reveal': return post('/reveal', {photo_id:id});
     case 'open-source': return navigate('albums', String(id));
+    case 'copy-source-name': await post('/libraries/' + id + '/clipboard'); return toast('Folder name copied.');
     case 'rescan': return startJob('/libraries/' + id + '/rescan');
     case 'reveal-source': return post('/libraries/' + id + '/reveal');
     case 'remove': return confirmRemoval(item);
@@ -139,7 +171,7 @@ async function editImage(photo) {
   if ($('#photo-modal').open) $('#photo-modal').close();
   const editor = {id:photo.id, turns:0, crop:[0,0,1,1], bitmap:null, dragging:null};
   imageEditor = editor;
-  modal('Edit a copy', '<p><strong>' + esc(photo.filename) + '</strong> · Rotate, then drag on the picture to crop. Your original stays untouched.</p>' + (photo.live_motion_id ? '<p class="field-hint">This saves a still JPEG copy. The original Live Photo and its motion stay together.</p>' : '') + '<div class="editor-stage"><canvas id="edit-canvas" aria-label="Image crop preview"></canvas></div><div class="editor-tools"><button class="button outline" data-edit-turn="-1">Rotate left</button><button class="button outline" data-edit-turn="1">Rotate right</button><button class="button outline" data-edit-reset>Reset crop</button><span id="edit-selection" role="status">Loading preview…</span></div><label class="field-label" for="edit-output">Save edited JPEG to a separate folder</label><div class="input-row"><input id="edit-output" placeholder="Choose an output folder"><button class="button outline" data-browse="edit-output">Browse</button></div><p class="field-hint">The full-resolution source is used when saving. Existing files are kept; name conflicts get a numbered suffix. Source GPS metadata is omitted.</p><div class="modal-actions"><button class="button outline" data-action="close-modal">Cancel</button><button class="button primary" id="save-edited-copy" disabled>Save edited copy</button></div>');
+  modal('Edit a copy', '<p><strong data-copyable>' + esc(photo.filename) + '</strong> · Rotate, then drag on the picture to crop. Your original stays untouched.</p>' + (photo.live_motion_id ? '<p class="field-hint">This saves a still JPEG copy. The original Live Photo and its motion stay together.</p>' : '') + '<div class="editor-stage"><canvas id="edit-canvas" aria-label="Image crop preview"></canvas></div><div class="editor-tools"><button class="button outline" data-edit-turn="-1">Rotate left</button><button class="button outline" data-edit-turn="1">Rotate right</button><button class="button outline" data-edit-reset>Reset crop</button><span id="edit-selection" role="status">Loading preview…</span></div><label class="field-label" for="edit-output">Save edited JPEG to a separate folder</label><div class="input-row"><input id="edit-output" placeholder="Choose an output folder"><button class="button outline" data-browse="edit-output">Browse</button></div><p class="field-hint">The full-resolution source is used when saving. Existing files are kept; name conflicts get a numbered suffix. Source GPS metadata is omitted.</p><div class="modal-actions"><button class="button outline" data-action="close-modal">Cancel</button><button class="button primary" id="save-edited-copy" disabled>Save edited copy</button></div>');
   try {
     const response = await fetch('/api/photos/' + photo.id + '/preview', {headers:{'X-Framekeep-Token':state.token}});
     if (response.status === 401) {lockApp(); throw new Error('Session expired. Reopen Framekeep.');}
@@ -210,6 +242,14 @@ document.addEventListener('click', async event => {
     }
     if (button.dataset.action === 'removed-items') return await showRemoved();
     if (button.hasAttribute('data-removed-page')) return await showRemoved(Number(button.dataset.removedPage));
+    if (button.dataset.forgetId) return confirmForget(button);
+    if (button.dataset.confirmForget) {
+      button.disabled = true;
+      const collection = button.dataset.forgetType === 'source' ? 'libraries' : 'photos';
+      const result = await api('/removed/' + collection + '/' + button.dataset.confirmForget, {method:'DELETE'});
+      if (button.isConnected && $('#modal').open) await showRemoved(Number(button.dataset.forgetPage));
+      return toast(result.skipped_previews ? 'Record forgotten. Some cached previews could not be cleared.' : 'Forgotten from Framekeep.');
+    }
     if (button.dataset.restoreSource) return await startJob('/libraries/' + button.dataset.restoreSource + '/restore');
     if (button.dataset.restorePhoto) return await startJob('/photos/' + button.dataset.restorePhoto + '/restore');
     if (button.hasAttribute('data-edit-turn') && imageEditor?.bitmap) {imageEditor.turns = (imageEditor.turns + Number(button.dataset.editTurn) + 4) % 4; imageEditor.crop = [0,0,1,1]; return drawEditor();}

@@ -19,6 +19,9 @@ from framekeep.image_processing import (
     MAX_OUTPUT_BYTES,
     MAX_PIXELS,
     MEMORY_BYTES,
+    TRUNCATED_IMAGE_MESSAGE,
+    TruncatedJPEGError,
+    is_truncated_image,
 )
 
 _job_handle = None
@@ -91,23 +94,24 @@ def decode(request: dict):
     from framekeep.category_model import initial_category, predict_category
     from framekeep.library import date_metadata
     from framekeep.live_metadata import apple_identifier
-    from framekeep.media_types import FORMAT_EXTENSIONS, media_kind, photo_extension
-    from framekeep.source_files import open_source
+    from framekeep.media_types import PHOTO_DECODERS, media_kind, photo_extension
+    from framekeep.source_files import open_source, require_file_identity
     from framekeep.visual_similarity import fingerprint
 
     register_heif_opener(decode_threads=1)
     Image.MAX_IMAGE_PIXELS = MAX_PIXELS
     warnings.simplefilter("error", Image.DecompressionBombWarning)
-    allowed = tuple(FORMAT_EXTENSIONS)
     path, root, size = Path(request["path"]), Path(request["root"]), request["size"]
     if not isinstance(size, int) or not 1 <= size <= 2200:
         raise ValueError("Invalid preview dimensions.")
     with open_source(path, root) as source:
+        expected = request.get("expected")
+        require_file_identity(source, expected)
         info = os.fstat(source.fileno())
         if not 0 < info.st_size <= MAX_FILE_BYTES:
             raise ValueError("Image exceeds the 256 MiB encoded-file limit.")
         try:
-            opened_image = Image.open(source, formats=allowed)
+            opened_image = Image.open(source, formats=PHOTO_DECODERS)
         except UnidentifiedImageError:
             source.seek(0)
             kind = media_kind(source.read(128))
@@ -125,16 +129,29 @@ def decode(request: dict):
             width, height = image.size
             if width * height > MAX_PIXELS or max(width, height) > MAX_DIMENSION:
                 raise ValueError("Image exceeds the 50 megapixel or 30,000 pixel-side limit.")
-            date, date_source, camera = date_metadata(image, path, info.st_mtime)
-            live_identifier = apple_identifier(image.getexif())
-            if request.get("metadata_only"):
-                return {"ok": True, "metadata": {"live_identifier": live_identifier,
-                        "size": info.st_size, "mtime_ns": info.st_mtime_ns}}
-            category = initial_category(path, camera, getattr(image, "is_animated", False))
+            faces_only = request.get("faces_only")
+            if not faces_only:
+                date, date_source, camera = date_metadata(image, path, info.st_mtime)
+                live_identifier = apple_identifier(image.getexif())
+                if request.get("metadata_only"):
+                    return {"ok": True, "metadata": {"live_identifier": live_identifier,
+                            "size": info.st_size, "mtime_ns": info.st_mtime_ns}}
+                # An MPO holds multiple still images. The primary frame is already selected.
+                animated = image.format != "MPO" and getattr(image, "is_animated", False)
+                category = initial_category(path, camera, animated)
             image.draft("RGB", (size, size))
-            normalized = ImageOps.exif_transpose(image)
+            try:
+                normalized = ImageOps.exif_transpose(image)
+            except OSError as error:
+                if image.format == "JPEG" and is_truncated_image(error):
+                    raise TruncatedJPEGError(TRUNCATED_IMAGE_MESSAGE) from None
+                raise
             normalized.thumbnail((size, size))
             normalized = normalized.convert("RGB")
+            if faces_only:
+                faces = extract_faces(normalized, Path(request["models"]))
+                require_file_identity(source, expected)
+                return {"ok": True, "faces": faces}
             if request.get("category_models") and category["kind_source"] == "pending":
                 try:
                     category = predict_category(normalized, Path(request["category_models"]))
@@ -143,6 +160,7 @@ def decode(request: dict):
             output = io.BytesIO()
             normalized.save(output, "JPEG", quality=88, exif=b"", icc_profile=None)
             faces = extract_faces(normalized, Path(request["models"])) if request.get("models") else []
+        require_file_identity(source, expected)
     return {
         "ok": True,
         "jpeg": base64.b64encode(output.getvalue()).decode("ascii"),
@@ -173,21 +191,24 @@ def extract_faces(image, models: Path):
 
     cv2.setNumThreads(1)
     bgr = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
-    buffers = []
-    for name, (_, checksum) in MODELS.items():
+    def model_buffer(name):
+        _, checksum = MODELS[name]
         with (models / name).open("rb") as stream:
             data = stream.read(50 * 1024 * 1024 + 1)
         if len(data) > 50 * 1024 * 1024 or hashlib.sha256(data).hexdigest() != checksum:
             raise ValueError("People model integrity check failed.")
-        buffers.append(np.frombuffer(data, dtype=np.uint8))
+        return np.frombuffer(data, dtype=np.uint8)
+
+    detector_name, recognizer_name = MODELS
     empty = np.empty(0, dtype=np.uint8)
-    detector = cv2.FaceDetectorYN.create("onnx", buffers[0], empty, (image.width, image.height), 0.85)
-    recognizer = cv2.FaceRecognizerSF.create("onnx", buffers[1], empty)
+    detector = cv2.FaceDetectorYN.create("onnx", model_buffer(detector_name), empty, (image.width, image.height), 0.85)
     _, boxes = detector.detect(bgr)
+    faces = [box for box in boxes[:50] if min(box[2], box[3]) >= 30] if boxes is not None else []
+    if not faces:
+        return []
+    recognizer = cv2.FaceRecognizerSF.create("onnx", model_buffer(recognizer_name), empty)
     result = []
-    for box in boxes[:50] if boxes is not None else []:
-        if min(box[2], box[3]) < 30:
-            continue
+    for box in faces:
         crop = recognizer.alignCrop(bgr, box)
         vector = recognizer.feature(crop).flatten()
         vector /= max(float(np.linalg.norm(vector)), 1e-9)
@@ -210,11 +231,16 @@ def main():
         if request.get("media_type") == "video":
             from framekeep.video_metadata import read_video_metadata
 
-            result = read_video_metadata(Path(request["path"]), Path(request["root"]))
+            result = read_video_metadata(Path(request["path"]), Path(request["root"]), expected=request.get("expected"))
         else:
             result = decode(request)
+    except TruncatedJPEGError:
+        result = {"ok": False, "error_code": "truncated_jpeg", "error": TRUNCATED_IMAGE_MESSAGE}
     except Exception as error:  # noqa: BLE001 -- isolated process boundary, no unsafe fallback
-        result = {"ok": False, "error": (str(error) or "Image worker resource limit exceeded.")[:400]}
+        message = str(error) or "Image worker resource limit exceeded."
+        if isinstance(error, OSError) and is_truncated_image(error):
+            message = TRUNCATED_IMAGE_MESSAGE
+        result = {"ok": False, "error": message[:400]}
     encoded = json.dumps(result).encode()
     if len(encoded) > MAX_OUTPUT_BYTES:
         encoded = b'{"ok":false,"error":"Image-worker output limit exceeded."}'

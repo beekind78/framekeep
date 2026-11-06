@@ -1,6 +1,5 @@
 """Full-length, bounded local playback conversion; no original is modified."""
 
-import hashlib
 import json
 import os
 import subprocess
@@ -11,27 +10,36 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from framekeep.image_worker import set_resource_limits
 from framekeep.source_files import open_source
 from framekeep.video_metadata import read_video_metadata
-from framekeep.video_policy import MAX_DURATION, MAX_INPUT, MAX_OUTPUT, WALL_SECONDS
+from framekeep.video_policy import (
+    MAX_DURATION,
+    MAX_INPUT,
+    MAX_OUTPUT,
+    PLAYBACK_BOUNDS,
+    WALL_SECONDS,
+    stage_video,
+)
 
 
 def convert(request):
     path, root, target = Path(request["path"]), Path(request["root"]), Path(request["target"])
+    quality = request.get("quality", "720p")
+    if quality not in PLAYBACK_BOUNDS:
+        raise ValueError("Unsupported playback quality.")
+    long_side, short_side = PLAYBACK_BOUNDS[quality]
+    width = f"if(gte(iw,ih),{long_side},{short_side})" if quality == "4k" else str(long_side)
+    height = f"if(gte(iw,ih),{short_side},{long_side})" if quality == "4k" else str(short_side)
+    scale = f"scale=w='min({width},iw)':h='min({height},ih)':force_original_aspect_ratio=decrease:force_divisible_by=2"
     metadata = read_video_metadata(path, root)["metadata"]
     if not 0 < metadata["duration"] <= MAX_DURATION:
         raise ValueError("In-app playback supports videos up to 30 minutes. Open the original for longer videos.")
     source = target.with_name("input.mov")
-    digest = hashlib.sha256()
     with open_source(path, root) as stream, source.open("xb") as output:
         info = os.fstat(stream.fileno())
         if not 0 < info.st_size <= MAX_INPUT:
             raise ValueError("In-app playback supports source files up to 2 GiB.")
         if (info.st_size, info.st_mtime_ns) != (request["size"], request["mtime_ns"]):
             raise ValueError("Video changed since indexing. Rescan this source.")
-        while block := stream.read(1024 * 1024):
-            digest.update(block)
-            output.write(block)
-    if digest.hexdigest() != request["sha256"]:
-        raise ValueError("Video contents changed since indexing. Rescan this source.")
+        stage_video(stream, output, info.st_size, request["sha256"])
     command = [
         request["ffmpeg"], "-nostdin", "-hide_banner", "-loglevel", "error", "-xerror",
         "-protocol_whitelist", "file", "-f", "mov", "-enable_drefs", "0", "-use_absolute_path", "0",
@@ -39,8 +47,8 @@ def convert(request):
         "-max_pixels", "50000000", "-i", str(source),
         "-map", "0:v:0", "-map", "0:a:0?", "-sn", "-dn", "-map_metadata", "-1", "-map_chapters", "-1",
         "-filter_threads", "1", "-vf",
-        "scale=w='min(1280,iw)':h='min(720,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,fps=30,format=yuv420p",
-        "-c:v", "libx264", "-threads", "1", "-preset", "veryfast", "-crf", "25",
+        scale + ",fps=30,format=yuv420p",
+        "-c:v", "libx264", "-threads", "1", "-preset", "veryfast", "-crf", "23" if quality == "4k" else "25",
         "-c:a", "aac", "-ac", "2", "-b:a", "128k", "-movflags", "+faststart",
         "-fs", str(MAX_OUTPUT), "-f", "mp4", str(target),
     ]

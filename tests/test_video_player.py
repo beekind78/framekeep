@@ -1,4 +1,5 @@
 import hashlib
+import io
 import json
 import shutil
 import subprocess
@@ -12,12 +13,38 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 import framekeep.video as video_module
-from framekeep import video_worker
+from framekeep import paths, video_worker
 from framekeep.app import create_app
 from framekeep.library import Library, file_hash
 from framekeep.video import Video, prepare_video
 from framekeep.video_metadata import read_video_metadata
+from framekeep.video_policy import MAX_PSSH_MARKERS, stage_video
 from tests.media_fixtures import video_bytes
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Framekeep's private FFmpeg path is Windows-specific")
+def test_private_ffmpeg_takes_precedence_over_path(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "user_directory", lambda: tmp_path)
+    monkeypatch.setattr(paths.shutil, "which", lambda _: "system-ffmpeg.exe")
+    assert paths.ffmpeg_executable() == "system-ffmpeg.exe"
+
+    private = tmp_path / "tools" / "ffmpeg" / "bin" / "ffmpeg.exe"
+    private.parent.mkdir(parents=True)
+    private.touch()
+    assert paths.ffmpeg_executable() == str(private)
+
+
+@pytest.mark.parametrize(
+    "payload, message",
+    [
+        (b"pssh" * MAX_PSSH_MARKERS + b"pssh", "too many protection headers"),
+        (b"dcomzlib", "Compressed QuickTime headers"),
+    ],
+)
+def test_ffmpeg_input_guard_checks_across_staging_chunks(payload, message):
+    content = b"\0" * (1024**2 - 2) + payload
+    with pytest.raises(ValueError, match=message):
+        stage_video(io.BytesIO(content), io.BytesIO(), len(content), hashlib.sha256(content).hexdigest())
 
 
 @pytest.fixture
@@ -50,7 +77,7 @@ def fake_conversion(photo, ffmpeg, target, cancelled):
 
 def test_authenticated_prepare_status_cancel_and_seekable_cache(video_library, monkeypatch):
     library, source, movie = video_library
-    monkeypatch.setattr(video_module.shutil, "which", lambda _: "ffmpeg")
+    monkeypatch.setattr(video_module, "ffmpeg_executable", lambda: "ffmpeg")
     monkeypatch.setattr(video_module, "prepare_video", fake_conversion)
     before = file_hash(source / "movie.HEIC")
     app = create_app(library.data)
@@ -76,6 +103,13 @@ def test_authenticated_prepare_status_cancel_and_seekable_cache(video_library, m
         assert ranged.status_code == 206 and ranged.content == response.content[8:20]
         assert client.get(path + "?token=" + token).status_code == 401
         assert client.post(path, headers=headers).json()["state"] == "ready"
+        high_path = path + "?quality=4k"
+        assert client.get(high_path, headers=headers).status_code == 400
+        assert client.post(path + "?quality=8k", headers=headers).status_code == 422
+        high_job = client.post(high_path, headers=headers).json()
+        assert high_job["quality"] == "4k" and finished(app.state.video, high_job)["state"] == "ready"
+        assert client.get(high_path, headers=headers).content == response.content
+        assert app.state.video.file(movie["id"], "4k") != app.state.video.file(movie["id"])
         assert not list(app.state.video.folder.glob("prepare-*"))
         (source / "movie.HEIC").write_bytes(b"changed")
         assert client.get(path, headers=headers).status_code == 400
@@ -94,7 +128,7 @@ def test_single_preparation_cancellation_cleanup_and_shutdown(video_library, mon
         exited.set()
         raise ValueError("cancelled")
 
-    monkeypatch.setattr(video_module.shutil, "which", lambda _: "ffmpeg")
+    monkeypatch.setattr(video_module, "ffmpeg_executable", lambda: "ffmpeg")
     monkeypatch.setattr(video_module, "prepare_video", slow)
     video = Video(library)
     try:
@@ -129,10 +163,10 @@ def test_images_missing_decoder_limits_and_failed_decode(video_library, monkeypa
         still = next(row for row in library.photos({}, None)["photos"] if row["media_type"] == "image")
         with pytest.raises(ValueError, match="still image"):
             video.prepare(still["id"])
-        monkeypatch.setattr(video_module.shutil, "which", lambda _: None)
+        monkeypatch.setattr(video_module, "ffmpeg_executable", lambda: None)
         with pytest.raises(ValueError, match="Install FFmpeg"):
             video.prepare(movie["id"])
-        monkeypatch.setattr(video_module.shutil, "which", lambda _: "ffmpeg")
+        monkeypatch.setattr(video_module, "ffmpeg_executable", lambda: "ffmpeg")
 
         def failed(*args):
             raise ValueError("damaged video")

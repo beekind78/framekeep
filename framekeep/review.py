@@ -5,6 +5,7 @@ import threading
 from pathlib import Path
 
 from .category_model import MODEL_VERSION
+from .checkpoints import photo_identity, run_items
 from .image_processing import process_image
 from .library import file_hash
 from .visual_similarity import VERSION, compare, find_pairs
@@ -16,26 +17,23 @@ class Review:
         self._cache_lock = threading.Lock()
         self._cached_rows, self._cached_result = None, None
 
-    def analyze(self, filters, progress, cancelled):
-        rows = self.library.photos({**filters, "media_type": "image", "duplicates": False}, None)["photos"]
+    def analyze(self, filters, progress, cancelled, checkpoint=None):
+        rows = self.library.analysis_rows({**filters, "media_type": "image", "duplicates": False}, checkpoint)
         ready = self.categories.ready()
-        errors, fingerprints, categorized, kept_manual = [], 0, 0, 0
-        for index, photo in enumerate(rows):
-            if cancelled():
-                break
-            progress(index, len(rows), photo["filename"])
+
+        def analyze_photo(photo):
             manual = photo["kind_override"] is not None
-            kept_manual += manual
+            outcome = {"manual": manual}
             classify = ready and not manual and photo["kind_source"] not in (
                 "filename", "camera", "animation", "sample"
-            ) and (photo["category_version"] != MODEL_VERSION or photo["kind"] == "Needs review")
+            ) and photo["category_version"] < MODEL_VERSION
             with self.library.connect() as db:
                 cached = db.execute(
                     "SELECT 1 FROM visual_fingerprints WHERE photo_id=? AND sha256=? AND version=?",
                     (photo["id"], photo["sha256"], VERSION),
                 ).fetchone()
             if cached and not classify:
-                continue
+                return outcome
             try:
                 processed = process_image(
                     Path(photo["path"]), Path(photo["source_root"]), 480,
@@ -54,21 +52,30 @@ class Review:
                     if not current:
                         raise ValueError("The indexed image changed. Rescan before analysis.")
                     self.library.save_fingerprint(db, photo["id"], photo["sha256"], processed["fingerprint"])
-                    fingerprints += 1
+                    updated = 0
                     if classify and not metadata.get("category_error"):
-                        categorized += db.execute(
+                        updated = db.execute(
                             "UPDATE photos SET kind=?,kind_source=?,kind_score=?,kind_suggestion=?,category_version=? "
                             "WHERE id=? AND sha256=? AND kind_override IS NULL",
                             (metadata["kind"], metadata["kind_source"], metadata["kind_score"],
                              metadata["kind_suggestion"], metadata["category_version"], photo["id"], photo["sha256"]),
                         ).rowcount
+                outcome.update(reviewed=1, categorized=updated)
                 if metadata.get("category_error"):
                     raise ValueError(metadata["category_error"])
             except (OSError, ValueError) as error:
-                errors.append({"file": photo["filename"], "reason": str(error)})
-        progress(len(rows), len(rows), "Local review complete")
+                outcome["error"] = {"file": photo["filename"], "reason": str(error)}
+            return outcome
+
+        outcomes = run_items(rows, photo_identity, analyze_photo, progress, cancelled, checkpoint,
+                             check_sources=self.library.check_analysis_sources)
+        errors = [item["error"] for item in outcomes if "error" in item]
+        if not cancelled():
+            progress(len(rows), len(rows), "Local review complete")
         return {
-            "reviewed": fingerprints, "category_updates": categorized, "kept_manual": kept_manual,
+            "reviewed": sum(item.get("reviewed", 0) for item in outcomes),
+            "category_updates": sum(item.get("categorized", 0) for item in outcomes),
+            "kept_manual": sum(item["manual"] for item in outcomes),
             "model_ready": ready, "error_count": len(errors), "errors": errors[:30], "cancelled": cancelled(),
         }
 

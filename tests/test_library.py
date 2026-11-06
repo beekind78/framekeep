@@ -122,6 +122,46 @@ def test_orientation_and_heic(library, tmp_path):
     assert rows["iphone.heic"]["extension"] == "HEIC"
 
 
+def test_mpo_uses_primary_still_and_keeps_all_frames_in_verified_copies(library, tmp_path):
+    source = tmp_path / "backup"
+    source.mkdir()
+    original = source / "multi-image.JPG"
+    primary = Image.new("RGB", (80, 60), "red")
+    secondary = Image.new("RGB", (80, 60), "blue")
+    primary.save(original, format="MPO", save_all=True, append_images=[secondary])
+    contents = original.read_bytes()
+
+    result = scan(library, source)
+    assert result["found"] == result["extension_mismatches"] == 1
+    assert result["error_count"] == 0
+    item = library.photos({}, None)["photos"][0]
+    assert item["extension"] == "MPO" and item["kind"] != "Animated"
+    with Image.open(library.thumbs / f"{item['id']}.jpg") as thumbnail:
+        red, _, blue = thumbnail.getpixel((40, 30))
+        assert red > 200 and blue < 20
+
+    output = tmp_path / "output"
+    output.mkdir()
+    preview = library.plan(str(output), "type", {}, False)
+    export = library.export(library.consume_plan(preview["token"]), lambda *args: None, lambda: False)
+    assert export["copied"] == 1
+    copy = next(output.rglob("*.mpo"))
+    assert copy.read_bytes() == original.read_bytes() == contents
+
+
+def test_incomplete_jpeg_is_skipped_with_a_backup_hint(library, tmp_path):
+    source = tmp_path / "backup"
+    source.mkdir()
+    original = source / "partial.jpg"
+    Image.effect_noise((320, 240), 60).convert("RGB").save(original)
+    partial = original.read_bytes()[: original.stat().st_size // 2]
+    original.write_bytes(partial)
+    result = scan(library, source)
+    assert result["found"] == 0 and result["error_count"] == 1
+    assert "incomplete (truncated)" in result["errors"][0]["reason"]
+    assert original.read_bytes() == partial
+
+
 def test_favorites_tags_selection_and_people_layout(library, tmp_path):
     source = tmp_path / "backup"
     photo(source / "family.jpg")

@@ -1,6 +1,6 @@
 [project]
 name = "framekeep"
-version = "1.13.0"
+version = "1.14.0"
 description = "A private, local photo organizer for rediscovering old phone backups."
 requires-python = ">=3.11"
 

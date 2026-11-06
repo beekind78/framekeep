@@ -1,7 +1,6 @@
 """Extract a small representative JPEG in a bounded worker and FFmpeg child."""
 
 import base64
-import hashlib
 import io
 import json
 import os
@@ -13,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from framekeep.image_worker import set_resource_limits
 from framekeep.source_files import open_source
 from framekeep.video_metadata import read_video_metadata
-from framekeep.video_policy import MAX_INPUT
+from framekeep.video_policy import MAX_INPUT, stage_video
 
 MAX_JPEG = 512 * 1024
 
@@ -25,21 +24,13 @@ def thumbnail(request):
     metadata = read_video_metadata(path, root)["metadata"]
     work = request["work"]
     source, target = Path(work) / "input.mov", Path(work) / "frame.jpg"
-    digest, copied = hashlib.sha256(), 0
     with open_source(path, root) as stream, source.open("xb") as output:
         info = os.fstat(stream.fileno())
         if not 0 < info.st_size <= MAX_INPUT:
             raise ValueError("Video thumbnails support source files up to 2 GiB.")
         if (info.st_size, info.st_mtime_ns) != (request["size"], request["mtime_ns"]):
             raise ValueError("Video changed since indexing. Rescan this source.")
-        while block := stream.read(1024 * 1024):
-            copied += len(block)
-            if copied > info.st_size or copied > MAX_INPUT:
-                raise ValueError("Video changed while preparing its thumbnail.")
-            digest.update(block)
-            output.write(block)
-    if digest.hexdigest() != request["sha256"]:
-        raise ValueError("Video contents changed since indexing. Rescan this source.")
+        stage_video(stream, output, info.st_size, request["sha256"])
     # Skip a little of the opening, then choose among 12 downscaled frames.
     position = min(1.0, metadata["duration"] / 10) if metadata["duration"] >= 1 else 0
     command = [

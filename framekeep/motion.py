@@ -1,11 +1,11 @@
 """Authenticated on-demand Live Photo previews. Originals are never transcoded in place."""
 
 import os
-import shutil
 import threading
 from pathlib import Path
 
 from .image_processing import process_motion
+from .paths import ffmpeg_executable
 from .source_files import open_source
 
 MAX_PREVIEW = 8 * 1024 * 1024
@@ -18,7 +18,7 @@ class Motion:
 
     @staticmethod
     def ready():
-        return shutil.which("ffmpeg") is not None
+        return ffmpeg_executable() is not None
 
     def preview(self, still_id):
         still = self.library.photo(still_id)
@@ -29,7 +29,7 @@ class Motion:
             info = os.fstat(source.fileno())
             if (info.st_size, info.st_mtime_ns) != (motion["size"], motion["mtime_ns"]):
                 raise ValueError("Motion changed since indexing. Rescan this source.")
-        ffmpeg = shutil.which("ffmpeg")
+        ffmpeg = ffmpeg_executable()
         if not ffmpeg:
             raise ValueError("Install FFmpeg and reopen Framekeep to play Live Photo motion. The still photo remains available.")
         with self._lock:

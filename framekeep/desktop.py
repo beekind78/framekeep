@@ -271,14 +271,15 @@ def launch(port=47831, title="Framekeep"):
             "OPEN_EXTERNAL_LINKS_IN_BROWSER": False, "OPEN_DEVTOOLS_IN_DEBUG": False,
             "REMOTE_DEBUGGING_PORT": None, "IGNORE_SSL_ERRORS": False, "SHOW_DEFAULT_MENUS": False})
         window = webview.create_window(title, url, width=1320, height=860, min_size=(940, 660),
-            background_color="#faf9f6", text_select=True, zoomable=False, draggable=False)
+            background_color="#122c24", text_select=True, zoomable=False, draggable=False)
         window.events.before_show += lambda: secure_webview(window, backend.url)
 
         def closing():
             try:
                 if backend.owns_server and backend.busy():
                     return window.create_confirmation_dialog("Close Framekeep?",
-                        "A task is still running. Stop it safely and close Framekeep? Completed copies will be kept.")
+                        "A task is still running. Close Framekeep? Completed work is kept. "
+                        "Scans, category analysis and Find people can be resumed when you reopen.")
             except (OSError, ValueError):
                 pass
             return True

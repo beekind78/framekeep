@@ -1,12 +1,16 @@
 """Download a pinned public model, then categorize photos entirely on this PC."""
 
 import hashlib
+import os
 import urllib.request
 from collections import Counter
 from pathlib import Path
 
 from .category_model import MODEL_BYTES, MODEL_NAME, MODEL_SHA256, MODEL_URL, MODEL_VERSION
+from .checkpoints import photo_identity, run_items
 from .image_processing import process_image
+from .library import scan_hash
+from .source_files import open_source
 
 
 class Categories:
@@ -51,7 +55,7 @@ class Categories:
                     progress(
                         received,
                         MODEL_BYTES,
-                        f"Downloading category model: {received / 1024 / 1024:.1f} / 85 MB",
+                        f"Downloading category model: {received / 1024**2:.1f} / {MODEL_BYTES / 1024**2:.1f} MiB",
                     )
             with temporary.open("rb") as stream:
                 digest = hashlib.file_digest(stream, "sha256").hexdigest()
@@ -63,36 +67,43 @@ class Categories:
         progress(MODEL_BYTES, MODEL_BYTES, "Category model ready")
         return {"ready": True}
 
-    def analyze(self, filters, progress, cancelled):
+    def analyze(self, filters, progress, cancelled, checkpoint=None):
         if not self.ready():
             raise ValueError("Download the category model first.")
         filters = {**filters, "media_type": "image"}
-        rows = self.library.photos(filters, limit=None)["photos"]
-        errors, updated, manual, unchanged = [], 0, 0, 0
-        for index, photo in enumerate(rows):
-            if cancelled():
-                break
-            progress(index, len(rows), photo["filename"])
+        rows = self.library.analysis_rows(filters, checkpoint)
+
+        def analyze_photo(photo):
             if photo["kind_override"] is not None:
-                manual += 1
-                continue
+                return {"manual": 1}
             if photo["kind_source"] in ("filename", "camera", "animation", "sample") or (
-                photo["category_version"] == MODEL_VERSION and photo["kind"] != "Needs review"
+                photo["category_version"] >= MODEL_VERSION
             ):
-                unchanged += 1
-                continue
+                return {"unchanged": 1}
             try:
-                processed = process_image(
-                    Path(photo["path"]), Path(photo["source_root"]), 480, category_models=self.directory
-                )
-                metadata = processed["metadata"]
-                if metadata.get("category_error"):
-                    raise ValueError(metadata["category_error"])
-                if (metadata["size"], metadata["mtime_ns"]) != (photo["size"], photo["mtime_ns"]):
-                    raise ValueError("Source changed since indexing. Rescan before detecting categories.")
+                path, root = Path(photo["path"]), Path(photo["source_root"])
+                metadata = self._matching_prediction(photo["sha256"])
+                fingerprint = None
+                if metadata is None:
+                    processed = process_image(path, root, 480, category_models=self.directory)
+                    metadata = processed["metadata"]
+                    if metadata.get("category_error"):
+                        raise ValueError(metadata["category_error"])
+                    if (metadata["size"], metadata["mtime_ns"]) != (photo["size"], photo["mtime_ns"]):
+                        raise ValueError("Source changed since indexing. Rescan before detecting categories.")
+                    fingerprint = processed.get("fingerprint")
+                with open_source(path, root) as source:
+                    info = os.fstat(source.fileno())
+                    if (info.st_size, info.st_mtime_ns) != (photo["size"], photo["mtime_ns"]):
+                        raise ValueError("Source changed since indexing. Rescan before detecting categories.")
+                    digest = scan_hash(source, info, cancelled)
+                    if digest is None:
+                        return None
+                    if digest != photo["sha256"]:
+                        raise ValueError("Source contents changed. Rescan before detecting categories.")
                 with self.library.connect() as db:
-                    if processed.get("fingerprint"):
-                        self.library.save_fingerprint(db, photo["id"], photo["sha256"], processed["fingerprint"])
+                    if fingerprint:
+                        self.library.save_fingerprint(db, photo["id"], photo["sha256"], fingerprint)
                     changed = db.execute(
                         "UPDATE photos SET kind=?,kind_source=?,kind_score=?,kind_suggestion=?,category_version=? "
                         "WHERE id=? AND kind_override IS NULL AND sha256=?",
@@ -106,17 +117,35 @@ class Categories:
                             photo["sha256"],
                         ),
                     ).rowcount
-                updated += changed
+                return {"updated": changed, "kind": metadata["kind"]}
             except (OSError, ValueError) as error:
-                errors.append({"file": photo["filename"], "reason": str(error)})
-        counts = Counter(photo["kind"] for photo in self.library.photos(filters, limit=None)["photos"])
-        progress(len(rows), len(rows), "Category detection complete")
+                return {"error": {"file": photo["filename"], "reason": str(error)}}
+
+        outcomes = run_items(rows, photo_identity, analyze_photo, progress, cancelled, checkpoint,
+                             check_sources=self.library.check_analysis_sources)
+        errors = [item["error"] for item in outcomes if "error" in item]
+        counts = Counter()
+        if not cancelled():
+            if filters.get("pending_categories"):
+                counts.update(item["kind"] for item in outcomes if item.get("updated"))
+            else:
+                counts.update(photo["kind"] for photo in self.library.photos(filters, limit=None)["photos"])
+            progress(len(rows), len(rows), "Category detection complete")
         return {
-            "categorized": updated,
-            "kept_manual": manual,
-            "already_classified": unchanged,
+            "categorized": sum(item.get("updated", 0) for item in outcomes),
+            "kept_manual": sum(item.get("manual", 0) for item in outcomes),
+            "already_classified": sum(item.get("unchanged", 0) for item in outcomes),
             "category_counts": dict(counts),
             "error_count": len(errors),
             "errors": errors[:30],
             "cancelled": cancelled(),
         }
+
+    def _matching_prediction(self, digest):
+        with self.library.connect() as db:
+            matched = db.execute(
+                "SELECT kind,kind_source,kind_score,kind_suggestion,category_version FROM photos "
+                "WHERE sha256=? AND missing=0 AND category_version=? AND kind_source IN ('model','uncertain') "
+                "ORDER BY id LIMIT 1", (digest, MODEL_VERSION),
+            ).fetchone()
+        return matched

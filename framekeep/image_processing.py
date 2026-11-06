@@ -13,7 +13,7 @@ from pathlib import Path
 
 from .source_files import open_source
 
-POLICY_VERSION = 2
+POLICY_VERSION = 3
 MAX_FILE_BYTES = 256 * 1024 * 1024
 MAX_PIXELS = 50_000_000
 MAX_DIMENSION = 30_000
@@ -21,6 +21,15 @@ MEMORY_BYTES = 1024 * 1024 * 1024
 TIMEOUT_SECONDS = 25
 MAX_OUTPUT_BYTES = 16 * 1024 * 1024
 _slot = threading.BoundedSemaphore(1)
+TRUNCATED_IMAGE_MESSAGE = "Image data is incomplete (truncated). Try a complete copy from your backup."
+
+
+class TruncatedJPEGError(ValueError):
+    """The JPEG header opened, but the strict pixel decoder found incomplete data."""
+
+
+def is_truncated_image(error: OSError) -> bool:
+    return str(error).lower().startswith(("image file is truncated", "truncated file read"))
 
 
 def _worker_command(worker="image_worker.py"):
@@ -31,7 +40,8 @@ def _worker_command(worker="image_worker.py"):
 
 
 def process_image(
-    path: Path, root: Path, size: int, *, models: Path | None = None, category_models: Path | None = None
+    path: Path, root: Path, size: int, *, models: Path | None = None, category_models: Path | None = None,
+    expected=None,
 ) -> dict:
     if not 1 <= size <= 2200:
         raise ValueError("Invalid preview dimensions.")
@@ -44,18 +54,25 @@ def process_image(
         "size": size,
         "models": str(models) if models else None,
         "category_models": str(category_models) if category_models else None,
+        "expected": expected,
     }
     result = _run_worker(request)
     result["jpeg"] = base64.b64decode(result["jpeg"], validate=True)
     return result
 
 
-def process_video(path: Path, root: Path) -> dict:
-    return _run_worker({"path": str(path), "root": str(root), "media_type": "video"})
+def process_video(path: Path, root: Path, *, expected=None) -> dict:
+    return _run_worker({"path": str(path), "root": str(root), "media_type": "video", "expected": expected})
 
 
 def process_photo_metadata(path: Path, root: Path) -> dict:
     return _run_worker({"path": str(path), "root": str(root), "size": 32, "metadata_only": True})
+
+
+def process_faces(path: Path, root: Path, models: Path, *, expected=None) -> list[dict]:
+    result = _run_worker({"path": str(path), "root": str(root), "size": 1600, "models": str(models),
+                          "faces_only": True, "expected": expected})
+    return result["faces"]
 
 
 def process_motion(path: Path, root: Path, ffmpeg: Path, sha256: str) -> bytes:
@@ -85,7 +102,8 @@ def _run_worker(request: dict) -> dict:
     with _slot:
         try:
             worker = {"motion": "motion_worker.py", "video_thumbnail": "video_thumbnail_worker.py",
-                      "image_edit": "image_edit_worker.py"}.get(request.get("operation"))
+                      "image_edit": "image_edit_worker.py", "jpeg_recovery": "image_edit_worker.py",
+                      "jpeg_repair": "image_edit_worker.py"}.get(request.get("operation"))
             completed = subprocess.run(
                 _worker_command(worker) if worker else _worker_command(),
                 input=json.dumps(request).encode(),
@@ -108,5 +126,7 @@ def _run_worker(request: dict) -> dict:
     except (ValueError, UnicodeError):
         raise ValueError("Image worker returned an invalid result; file was skipped.") from None
     if not result.get("ok"):
+        if result.get("error_code") == "truncated_jpeg":
+            raise TruncatedJPEGError(TRUNCATED_IMAGE_MESSAGE)
         raise ValueError(result.get("error", "This image could not be processed."))
     return result

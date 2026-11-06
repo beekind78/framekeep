@@ -1,6 +1,8 @@
 import argparse
+import asyncio
 import io
 import json
+import os
 import secrets
 import struct
 import subprocess
@@ -20,8 +22,8 @@ import framekeep.image_processing as processing
 import run
 from framekeep import source_files
 from framekeep.access import LocalAccess, RuntimeStore, listener_proof
-from framekeep.app import create_app
-from framekeep.library import Library, file_hash
+from framekeep.app import BOOTSTRAP_MAX_BYTES, create_app
+from framekeep.library import Library, file_hash, scan_hash
 from framekeep.paths import data_directory
 from framekeep.source_files import open_source
 
@@ -103,6 +105,74 @@ def test_bootstrap_roles_origins_replays_and_private_mutations(tmp_path):
             app.state.access.control, app.state.access.instance, "a" * 64
         )
         assert "token" not in health and "control" not in health and "data_dir" not in health
+
+
+def test_bootstrap_bounds_declared_and_streamed_bodies_before_spending_ticket(tmp_path):
+    app = create_app(tmp_path / "data")
+    ticket = app.state.access.ticket()
+    payload = json.dumps({"ticket": ticket, "padding": " " * BOOTSTRAP_MAX_BYTES}).encode()
+
+    async def send_chunked():
+        chunks = iter((payload[:512], payload[512:]))
+        responses = []
+
+        async def receive():
+            body = next(chunks, b"")
+            return {"type": "http.request", "body": body, "more_body": bool(body)}
+
+        async def send(message):
+            responses.append(message)
+
+        await app({
+            "type": "http", "asgi": {"version": "3.0", "spec_version": "2.4"},
+            "http_version": "1.1", "scheme": "http", "method": "POST", "path": "/api/bootstrap",
+            "headers": [(b"host", b"127.0.0.1"), (b"content-type", b"application/json")],
+            "query_string": b"", "server": ("127.0.0.1", 80),
+        }, receive, send)
+        assert responses[0]["status"] == 413
+
+    with TestClient(app, base_url="http://127.0.0.1") as client:
+        response = client.post("/api/bootstrap", content=payload, headers={"Content-Type": "application/json"})
+        assert response.status_code == 413
+        asyncio.run(send_chunked())
+        assert client.post("/api/bootstrap", json={"ticket": ticket}).status_code == 200
+
+
+def test_scan_worker_rejects_replaced_photo_even_with_matching_size_and_mtime(tmp_path):
+    original = image_file(tmp_path / "source" / "photo.jpg")
+    replacement = original.with_name("replacement.jpg")
+    replacement.write_bytes(original.read_bytes())
+    info = original.stat()
+    os.utime(replacement, ns=(info.st_atime_ns, info.st_mtime_ns))
+    expected = source_files.file_identity(info)
+    replacement.replace(original)
+    with pytest.raises(ValueError, match="changed during indexing"):
+        processing.process_image(original, original.parent, 480, expected=expected)
+
+
+def test_scan_hash_stops_before_reading_next_chunk_when_cancelled(tmp_path):
+    path = tmp_path / "synthetic"
+    path.write_bytes(b"x" * (2 * 1024**2))
+    with path.open("rb") as stream:
+        assert scan_hash(stream, os.fstat(stream.fileno()), lambda: stream.tell() >= 1024**2) is None
+        assert stream.tell() == 1024**2
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="POSIX named pipes")
+def test_source_fifo_is_rejected_before_a_blocking_read(tmp_path):
+    pipe = tmp_path / "pipe.jpg"
+    os.mkfifo(pipe)
+    root = Path(__file__).resolve().parents[1]
+    script = (
+        "import sys; sys.path.insert(0, sys.argv[1]); from pathlib import Path; "
+        "from framekeep.source_files import open_source; path = Path(sys.argv[2]); "
+        "open_source(path, path.parent).__enter__()"
+    )
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", script, str(root), str(pipe)],
+        capture_output=True, text=True, timeout=5, check=False,
+    )
+    assert result.returncode != 0 and "Only regular" in result.stderr
 
 
 def test_ticket_expiry_session_expiry_and_restart_rotation(monkeypatch):

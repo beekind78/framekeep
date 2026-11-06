@@ -2,6 +2,7 @@
 
 FORMAT_EXTENSIONS = {
     "JPEG": ("JPG", "JPEG"),
+    "MPO": ("MPO",),
     "PNG": ("PNG",),
     "WEBP": ("WEBP",),
     "GIF": ("GIF",),
@@ -10,6 +11,8 @@ FORMAT_EXTENSIONS = {
     "HEIF": ("HEIC", "HEIF"),
     "AVIF": ("AVIF",),
 }
+# Pillow detects MPO through its JPEG decoder rather than a separate opener.
+PHOTO_DECODERS = tuple(name for name in FORMAT_EXTENSIONS if name != "MPO")
 PHOTO_EXTENSIONS = {"." + suffix.lower() for suffixes in FORMAT_EXTENSIONS.values() for suffix in suffixes}
 _PHOTO_BRANDS = {
     b"heic",
@@ -63,6 +66,8 @@ def media_kind(header: bytes) -> str:
 
 def photo_extension(format_name: str, suffix: str) -> str:
     """Keep a valid photo suffix, otherwise use the decoder's canonical extension."""
-    extensions = FORMAT_EXTENSIONS[format_name]
+    extensions = FORMAT_EXTENSIONS.get(format_name)
+    if not extensions:
+        raise ValueError(f"Unsupported image format: {format_name}.")
     original = suffix.lstrip(".").upper()
     return original if original in extensions else extensions[0]

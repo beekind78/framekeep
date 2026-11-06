@@ -10,9 +10,37 @@
   <link rel="stylesheet" href="/static/workspace.css">
   <script src="/static/app.js" defer></script>
   <script src="/static/context.js" defer></script>
+  <script src="/static/batch-review.js" defer></script>
 </head>
-<body>
+<body class="is-starting">
+<section class="startup-screen" aria-label="Framekeep startup">
+  <div class="startup-inner">
+    <div class="startup-mark" aria-hidden="true">
+      <svg class="startup-logo" viewBox="0 0 40 40" width="60" height="60" focusable="false">
+        <use href="#framekeep-picture"/>
+        <g class="motion-frame">
+          <use class="motion-corner" href="#framekeep-corner-tl"/>
+          <use class="motion-corner" href="#framekeep-corner-tr"/>
+          <use class="motion-corner" href="#framekeep-corner-br"/>
+          <use class="motion-corner" href="#framekeep-corner-bl"/>
+        </g>
+      </svg>
+    </div>
+    <p class="startup-wordmark">framekeep<span>.</span></p>
+    <p class="startup-status" id="startup-status" role="status">Opening a private session…</p>
+    <noscript><p class="startup-status">Enable JavaScript and reopen Framekeep to continue.</p></noscript>
+  </div>
+</section>
 <svg class="sprite" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><defs>
+  <g id="framekeep-picture">
+    <rect width="40" height="40" rx="12" fill="#244b43" stroke="none"/>
+    <path d="m14 24 5-6 4 4 3-3" fill="none" stroke="#f8f4e9" stroke-width="2.4" stroke-linecap="round"/>
+    <circle cx="25" cy="15" r="2" fill="#dccba4" stroke="none"/>
+  </g>
+  <path id="framekeep-corner-tl" d="M11 17v-6h6"/>
+  <path id="framekeep-corner-tr" d="M23 11h6v6"/>
+  <path id="framekeep-corner-br" d="M29 23v6h-6"/>
+  <path id="framekeep-corner-bl" d="M17 29h-6v-6"/>
   <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></symbol>
   <symbol id="i-calendar" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="16" rx="3"/><path d="M7 3v4m10-4v4M3 11h18m-13 4h1m6 0h1m-8 3h1"/></symbol>
   <symbol id="i-people" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><path d="M3 21v-3a6 6 0 0 1 12 0v3m2-16a3 3 0 0 1 0 6m1 3a5 5 0 0 1 3 4v3"/></symbol>
@@ -46,22 +74,28 @@
     <button class="nav-item" data-view="favorites"><svg><use href="#i-heart"/></svg>Favorites</button>
   </nav>
   <div class="nav-divider"></div>
-  <div class="workspace-label source-heading">SOURCES<button class="tiny" data-action="add" aria-label="Add source folder"><svg><use href="#i-plus"/></svg></button></div>
-  <div id="source-list" class="source-list"><p class="source-empty">Your photo folders will live here.</p></div>
+  <section class="source-section" aria-label="Source folders">
+    <details id="source-menu">
+      <summary class="workspace-label source-heading"><span>Sources</span><span id="source-count" class="source-count"></span><svg aria-hidden="true"><use href="#i-chevron"/></svg></summary>
+      <div id="source-list" class="source-list"><p class="source-empty">Your photo folders will live here.</p></div>
+    </details>
+    <button class="tiny source-add" data-action="add" aria-label="Add source folder" title="Add source folder"><svg><use href="#i-plus"/></svg></button>
+  </section>
   <div class="sidebar-bottom">
     <button class="help-button" data-action="removed-items"><svg><use href="#i-refresh"/></svg>Removed items</button>
     <div class="privacy-card"><svg><use href="#i-shield"/></svg><div><strong>Stored on this PC</strong><p>Your library stays private.</p></div><span class="status-dot"></span></div>
-    <button class="help-button" data-action="about"><svg><use href="#i-info"/></svg>About Framekeep<span>v1.13</span></button>
+    <button class="help-button" data-action="about"><svg><use href="#i-info"/></svg>About Framekeep<span>v1.14</span></button>
   </div>
 </aside>
 <main>
-  <header class="topbar"><div class="breadcrumb">Library <span>/</span> <strong id="breadcrumb">Albums</strong></div><div class="top-actions"><span class="local-badge"><span class="status-dot"></span>On this PC</span><button class="button primary small" data-action="add"><svg><use href="#i-plus"/></svg>Add folder</button></div></header>
+  <header class="topbar"><div class="breadcrumb">Library <span>/</span> <strong id="breadcrumb">Albums</strong></div><div class="top-actions"><span class="local-badge"><span class="status-dot"></span>On this PC</span><button class="button primary small" data-action="add"><svg><use href="#i-plus"/></svg>Add folder</button></div><span id="library-status" class="visually-hidden" role="status"></span></header>
   <div class="page-content">
     <section class="page-heading"><div><div class="eyebrow" id="view-label">YOUR COLLECTION</div><h1 id="page-title">Your library</h1><p id="page-subtitle">Photos and videos, organized on your PC.</p></div><button class="button outline" id="organize-button" data-action="organize"><svg><use href="#i-folder"/></svg>Organize copies<svg><use href="#i-arrow"/></svg></button></section>
     <section id="stats" class="stats" aria-label="Library overview"></section>
     <section id="welcome" class="welcome hidden"><div><span class="pill">A FRESH START FOR OLD MEMORIES</span><h2>Years of photos.<br>One happy place.</h2><p>Connect a backup folder and rediscover what’s inside.<br>Your originals stay right where they are.</p><div class="welcome-actions"><button class="button cream" data-action="add"><svg><use href="#i-plus"/></svg>Connect your first folder</button><button class="text-button light" data-action="demo">Explore a sample library <span>↗</span></button></div></div><div class="paper-scene" aria-hidden="true"><div class="print print-back"><div class="mini-landscape sunset"></div><span>the little things</span></div><div class="print print-front"><div class="mini-landscape"></div><span>somewhere worth remembering</span></div><div class="scene-spark">✳</div></div></section>
     <div id="demo-banner" class="notice hidden"><svg><use href="#i-spark"/></svg><span><strong>You’re exploring the sample library.</strong> These are original landscape illustrations, ready to try.</span><button class="text-button" data-action="add">Add your photos <span>↗</span></button></div>
     <section id="toolbar" class="toolbar"><div class="search-field"><svg><use href="#i-search"/></svg><input id="search" type="search" placeholder="Search filenames, tags, or camera…" aria-label="Search photos"><kbd>/</kbd></div><div class="filters"><select id="filter-year" aria-label="Filter by year"><option value="">All dates</option></select><select id="filter-type" aria-label="Filter by file type"><option value="">All formats</option></select><select id="filter-kind" aria-label="Filter by image category"><option value="">All kinds</option></select><button id="reset-filters" class="icon-button" aria-label="Reset filters" title="Reset filters"><svg><use href="#i-refresh"/></svg></button></div></section>
+    <div id="active-filters" class="active-filters hidden" role="group" aria-label="Active filters"></div>
     <section id="albums-view" class="hidden" aria-label="Albums"></section>
     <section id="review-tools" class="hidden" aria-label="Photo review"></section>
     <section id="category-bar" class="category-bar hidden" aria-label="Image categories"><div id="category-chips" class="category-chips"></div><button id="detect-categories" class="button outline small">Detect categories</button></section>
@@ -74,7 +108,27 @@
   </div>
 </main>
 <div id="selection-toolbar" class="selection-toolbar hidden" role="toolbar" aria-label="Selected media actions"><strong id="selection-toolbar-count" aria-live="polite"></strong><button data-selection-action="copy-files" title="Copy originals (Ctrl+C)"><svg><use href="#i-copy"/></svg>Copy</button><button data-selection-action="copy-folder" title="Organize selected copies"><svg><use href="#i-folder"/></svg>Organize</button><button data-selection-action="remove" title="Remove from Framekeep only (Delete)"><svg><use href="#i-close"/></svg>Remove</button><button class="selection-clear" data-action="clear-selected" aria-label="Clear selected items" title="Clear selection"><svg><use href="#i-close"/></svg></button></div>
-<div id="job-dock" class="job-dock hidden" role="status"><div class="job-top"><span class="job-spinner"></span><strong id="job-label"></strong><span id="job-count"></span><button id="job-cancel" class="text-button">Cancel</button></div><progress id="job-progress" max="100"></progress><div id="job-message"></div></div>
+<div id="job-dock" class="job-dock hidden" role="status">
+  <div class="job-top">
+    <svg class="task-logo" viewBox="0 0 40 40" width="24" height="24" aria-hidden="true" focusable="false">
+      <use href="#framekeep-picture"/>
+      <g class="motion-frame">
+        <use class="motion-corner" href="#framekeep-corner-tl"/>
+        <use class="motion-corner" href="#framekeep-corner-tr"/>
+        <use class="motion-corner" href="#framekeep-corner-br"/>
+        <use class="motion-corner" href="#framekeep-corner-bl"/>
+      </g>
+    </svg>
+    <strong id="job-label"></strong><span id="job-count"></span>
+  </div>
+  <progress id="job-progress" max="100" aria-label="Task progress"></progress>
+  <div class="job-details"><div id="job-message"></div><span id="job-eta" title="Estimated time remaining"></span></div>
+  <div class="job-actions">
+    <button id="job-cancel" class="text-button">Cancel</button>
+    <button id="job-pause" class="button outline small hidden">Pause</button>
+    <button id="job-resume" class="button primary small hidden">Resume</button>
+  </div>
+</div>
 <div id="toast" class="toast hidden" role="status"></div>
 <div id="context-menu" class="context-menu" popover="manual" role="menu" aria-label="Item actions"></div>
 <dialog id="modal"><div id="modal-content"></div></dialog>

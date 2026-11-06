@@ -5,17 +5,18 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from .live_metadata import identifier
-from .source_files import open_source
+from .source_files import open_source, require_file_identity
 
 MAX_ATOMS = 4096
 MAX_READ_BYTES = 1024 * 1024
 MAX_VIDEO_BYTES = 64 * 1024 * 1024 * 1024
 
 
-def read_video_metadata(path: Path, root: Path) -> dict:
+def read_video_metadata(path: Path, root: Path, *, expected=None) -> dict:
     from .library import fallback_date
 
     with open_source(path, root) as stream:
+        require_file_identity(stream, expected)
         info = os.fstat(stream.fileno())
         if not 0 < info.st_size <= MAX_VIDEO_BYTES:
             raise ValueError("Video exceeds the 64 GiB file limit.")
@@ -141,6 +142,7 @@ def read_video_metadata(path: Path, root: Path) -> dict:
                             pass
 
         walk(0, info.st_size)
+        require_file_identity(stream, expected)
         if not video:
             raise ValueError("This container has no video track; it was not indexed as a video.")
         date, source = (created, "Video metadata") if created else fallback_date(path, info.st_mtime)

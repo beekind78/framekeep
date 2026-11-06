@@ -1,5 +1,7 @@
 """Loopback-only HTTP application. The browser is a UI, never an upload destination."""
 
+import asyncio
+import base64
 import os
 import subprocess
 import sys
@@ -11,27 +13,40 @@ from typing import Annotated, Literal
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from starlette.middleware.trustedhost import TrustedHostMiddleware
+from starlette.requests import ClientDisconnect
 
 from . import clipboard
 from .access import SESSION_TTL, TICKET_TTL, VERSION, LocalAccess
 from .categories import Categories
 from .category_model import Category
+from .category_review import CategoryReview, Suggestion
 from .demo import create_demo
-from .editing import save_edit
+from .editing import (
+    recover_jpegs,
+    recovery_preview,
+    repairable_photo,
+    review_photo_repair,
+    review_recovery_matches,
+    save_edit,
+    save_photo_repair,
+)
 from .image_processing import process_image
 from .jobs import Jobs
 from .library import Library
 from .live_photos import LivePhotos
 from .motion import Motion
-from .paths import data_directory
+from .output_files import ApprovedOutput
+from .paths import data_directory, protect_default_data, recovery_directory
 from .people import People
 from .review import Review
 from .source_files import open_source, source_path
 from .video import Video
+from .video_policy import PlaybackQuality
 
 STATIC = Path(__file__).parent / "static"
+BOOTSTRAP_MAX_BYTES = 1024
 
 
 class ScanRequest(BaseModel):
@@ -58,6 +73,7 @@ class PhotoFilters(BaseModel):
     duplicates: bool = False
     collapse_live: bool = False
     live_only: bool = False
+    pending_categories: Literal["", "new", "older"] = ""
     ids: list[int] | None = Field(default=None, min_length=1, max_length=5000)
 
 
@@ -73,6 +89,27 @@ class ExportRequest(BaseModel):
     token: str
 
 
+class RecoveryScan(BaseModel):
+    scan_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+
+
+class JobAction(BaseModel):
+    job_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+
+
+class RecoveryRequest(RecoveryScan):
+    destination: str = Field(default="", max_length=4096)
+    enhance: bool = False
+    prefer_larger: bool = False
+    trim_edge: bool = False
+    approved_matches: list[int] = Field(default_factory=list, max_length=20000)
+
+
+class RepairRequest(BaseModel):
+    choice: Literal["crop", "match"]
+    destination: str = Field(default="", max_length=4096)
+
+
 class CategoryAssignment(BaseModel):
     ids: list[int] = Field(min_length=1, max_length=5000)
     kind: Category | None
@@ -80,6 +117,36 @@ class CategoryAssignment(BaseModel):
 
 class CategoryAnalysis(BaseModel):
     filters: PhotoFilters = Field(default_factory=PhotoFilters)
+
+
+class PeopleAnalysis(BaseModel):
+    library: Annotated[int, Field(gt=0)] | Literal[""] = ""
+    date: str = Field(default="", pattern=r"^(?:\d{4}(?:-(?:0[1-9]|1[0-2]))?)?$")
+    photos_only: bool = False
+    limit: Literal[0, 250, 1000, 5000] = 0
+
+
+class BatchPreview(CategoryAnalysis):
+    kind: Suggestion | None = None
+    offset: int = Field(default=0, ge=0)
+
+
+class BatchGroup(BaseModel):
+    id: int = Field(gt=0)
+    revision: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class BatchApproval(CategoryAnalysis):
+    kind: Suggestion
+    groups: list[BatchGroup] = Field(min_length=1, max_length=24)
+
+
+class BatchUndo(BaseModel):
+    batch_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+
+
+class AcceptAllSuggestions(CategoryAnalysis):
+    revision: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 class NameRequest(BaseModel):
@@ -103,7 +170,7 @@ class BootstrapRequest(BaseModel):
 
 
 class ClipboardRequest(BaseModel):
-    mode: Literal["files", "path"] = "files"
+    mode: Literal["files", "path", "name"] = "files"
 
 
 class SelectedItems(BaseModel):
@@ -111,7 +178,7 @@ class SelectedItems(BaseModel):
 
 
 class SelectedClipboard(SelectedItems):
-    mode: Literal["files", "path"] = "files"
+    mode: Literal["files", "path", "name"] = "files"
 
 
 Fraction = Annotated[float, Field(ge=0, le=1, allow_inf_nan=False)]
@@ -128,21 +195,32 @@ def default_data():
 
 
 def create_app(data_dir: Path | None = None, *, access: LocalAccess | None = None):
-    library = Library(data_dir or default_data())
-    people, jobs = People(library), Jobs()
+    if data_dir is None:
+        data_dir = default_data()
+        protect_default_data(data_dir)
+    library = Library(data_dir)
+    people = People(library)
     access = access or LocalAccess()
     picker_lock = threading.Lock()
 
     @asynccontextmanager
     async def lifespan(app):
         yield
+        jobs.interrupt()
         video.close()
         jobs.close()
 
     categories = Categories(library)
+    category_review = CategoryReview(library)
     review = Review(library, categories)
     live_photos, motion = LivePhotos(library), Motion(library)
     video = Video(library)
+    jobs = Jobs(library.connect, {
+        "scan": library.scan, "review": review.analyze, "categories": categories.analyze,
+        "people": lambda scope, progress, cancelled, checkpoint: people.analyze(
+            progress, cancelled, scope=scope, checkpoint=checkpoint,
+        ),
+    })
     app = FastAPI(title="Framekeep", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     app.state.library, app.state.people, app.state.jobs = library, people, jobs
     app.state.access = access
@@ -203,8 +281,8 @@ def create_app(data_dir: Path | None = None, *, access: LocalAccess | None = Non
         )
 
     def idle():
-        if jobs.busy():
-            raise ValueError("Wait for the current task to finish, or cancel it first.")
+        with jobs.while_idle():
+            pass
 
     @app.get("/api/health")
     def health(challenge: str = Query(min_length=64, max_length=64)):
@@ -220,7 +298,27 @@ def create_app(data_dir: Path | None = None, *, access: LocalAccess | None = Non
         return {"ticket": access.ticket(), "expires_in": TICKET_TTL}
 
     @app.post("/api/bootstrap")
-    def bootstrap(body: BootstrapRequest):
+    async def bootstrap(request: Request):
+        length = request.headers.get("content-length")
+        if length is not None and (not length.isascii() or not length.isdecimal()):
+            raise HTTPException(400, "Invalid launch request length.")
+        if length is not None and (len(length) > 10 or int(length) > BOOTSTRAP_MAX_BYTES):
+            raise HTTPException(413, "Launch request is too large.")
+        payload = bytearray()
+        try:
+            async with asyncio.timeout(5):
+                async for chunk in request.stream():
+                    if len(payload) + len(chunk) > BOOTSTRAP_MAX_BYTES:
+                        raise HTTPException(413, "Launch request is too large.")
+                    payload.extend(chunk)
+        except TimeoutError:
+            raise HTTPException(408, "Launch request timed out.") from None
+        except ClientDisconnect:
+            raise HTTPException(400, "Launch request was interrupted.") from None
+        try:
+            body = BootstrapRequest.model_validate_json(payload)
+        except ValidationError:
+            raise HTTPException(422, "Invalid launch request.") from None
         try:
             token = access.exchange(body.ticket)
         except ValueError as error:
@@ -237,6 +335,7 @@ def create_app(data_dir: Path | None = None, *, access: LocalAccess | None = Non
             "motion_ready": motion.ready(),
             "video_ready": video.ready(),
             "data_dir": str(library.data),
+            "recovery_output": str(recovery_directory()),
         }
 
     @app.get("/api/summary")
@@ -290,22 +389,36 @@ def create_app(data_dir: Path | None = None, *, access: LocalAccess | None = Non
     def removed(offset: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=100)):
         return library.removed_items(offset, limit)
 
+    @app.delete("/api/removed/photos/{photo_id}")
+    def forget_photo(photo_id: int):
+        with jobs.while_idle():
+            return library.forget_removed(photo_id)
+
+    @app.delete("/api/removed/libraries/{library_id}")
+    def forget_library(library_id: int):
+        with jobs.while_idle():
+            return library.forget_removed(library_id, source=True)
+
     def restore_scan(library_id):
-        return jobs.submit("Rescanning library", lambda progress, cancelled: library.scan(library_id, progress, cancelled))
+        return jobs.submit_resumable("scan", "Rescanning library", library_id)
 
     @app.post("/api/photos/{photo_id}/restore")
     def restore_photo(photo_id: int):
-        idle()
-        return restore_scan(library.restore_photo(photo_id))
+        with jobs.while_idle():
+            return restore_scan(library.restore_photo(photo_id))
 
     @app.post("/api/libraries/{library_id}/restore")
     def restore_library(library_id: int):
-        idle()
-        return restore_scan(library.restore_library(library_id))
+        with jobs.while_idle():
+            return restore_scan(library.restore_library(library_id))
 
     def copy_originals(ids, mode):
         ids = list(dict.fromkeys(ids))
         rows = library.original_files_many(ids)
+        if mode == "name":
+            names = {row["id"]: row["filename"] for row in rows}
+            clipboard.copy_text("\r\n".join(names[photo_id] for photo_id in ids))
+            return {"copied": len(ids)}
         with ExitStack() as stack:
             paths = []
             for row in rows:
@@ -328,14 +441,23 @@ def create_app(data_dir: Path | None = None, *, access: LocalAccess | None = Non
     def copy_selected(body: SelectedClipboard):
         return copy_originals(body.ids, body.mode)
 
+    @app.post("/api/libraries/{library_id}/clipboard")
+    def copy_source_name(library_id: int):
+        with library.connect() as db:
+            row = db.execute("SELECT name FROM libraries WHERE id=? AND removed=0", (library_id,)).fetchone()
+        if row is None:
+            raise ValueError("This source folder is unavailable.")
+        clipboard.copy_text(row["name"])
+        return {"copied": 1}
+
     @app.post("/api/photos/{photo_id}/edit")
     def edit_image(photo_id: int, body: ImageEditRequest):
         idle()
         if library.photo(photo_id)["media_type"] != "image":
             raise ValueError("Image editing is available for still photos only.")
-        library.output_folder(body.destination)
+        output = ApprovedOutput.inspect(library.output_folder(body.destination))
         return jobs.submit("Saving edited copy", lambda progress, cancelled:
-                           save_edit(library, photo_id, body.destination, body.turns, body.crop, progress, cancelled))
+                           save_edit(library, photo_id, output, body.turns, body.crop, progress, cancelled))
 
     @app.post("/api/libraries/{library_id}/reveal")
     def reveal_library(library_id: int):
@@ -359,11 +481,35 @@ def create_app(data_dir: Path | None = None, *, access: LocalAccess | None = Non
 
     @app.post("/api/review/analyze")
     def analyze_review(body: CategoryAnalysis):
-        idle()
-        return jobs.submit(
-            "Reviewing categories and similar photos",
-            lambda progress, cancelled: review.analyze(body.filters.model_dump(), progress, cancelled),
-        )
+        return jobs.submit_resumable("review", "Reviewing categories and similar photos", body.filters.model_dump())
+
+    @app.post("/api/review/batch-preview")
+    def preview_category_batch(body: BatchPreview):
+        return category_review.preview(body.filters.model_dump(), body.kind, body.offset)
+
+    @app.post("/api/review/batch-approve")
+    def approve_category_batch(body: BatchApproval):
+        with jobs.while_idle():
+            return category_review.approve(body.filters.model_dump(), body.kind,
+                                           {group.id: group.revision for group in body.groups})
+
+    @app.get("/api/review/batch-history")
+    def category_batch_history(offset: int = Query(default=0, ge=0, le=1_000_000)):
+        return category_review.history(offset)
+
+    @app.post("/api/review/accept-all/preview")
+    def preview_all_suggestions(body: CategoryAnalysis):
+        return category_review.preview_all(body.filters.model_dump())
+
+    @app.post("/api/review/accept-all")
+    def accept_all_suggestions(body: AcceptAllSuggestions):
+        with jobs.while_idle():
+            return category_review.approve_all(body.filters.model_dump(), body.revision)
+
+    @app.post("/api/review/batch-undo")
+    def undo_category_batch(body: BatchUndo):
+        with jobs.while_idle():
+            return category_review.undo(body.batch_id)
 
     @app.get("/api/photos/{photo_id}/thumbnail")
     def thumbnail(photo_id: int):
@@ -384,11 +530,9 @@ def create_app(data_dir: Path | None = None, *, access: LocalAccess | None = Non
 
     @app.post("/api/scan")
     def scan(body: ScanRequest):
-        idle()
-        library_id = library.add(body.path)
-        return jobs.submit(
-            "Indexing photos", lambda progress, cancelled: library.scan(library_id, progress, cancelled)
-        )
+        with jobs.while_idle():
+            library_id = library.add(body.path)
+            return jobs.submit_resumable("scan", "Indexing photos", library_id)
 
     @app.post("/api/live-photos/analyze")
     def link_live_photos(body: CategoryAnalysis):
@@ -401,8 +545,8 @@ def create_app(data_dir: Path | None = None, *, access: LocalAccess | None = Non
         return Response(motion.preview(photo_id), media_type="video/mp4")
 
     @app.post("/api/photos/{photo_id}/playback")
-    def prepare_playback(photo_id: int):
-        return video.prepare(photo_id)
+    def prepare_playback(photo_id: int, quality: PlaybackQuality = "720p"):
+        return video.prepare(photo_id, quality)
 
     @app.get("/api/playback/{job_id}")
     def playback_status(job_id: str):
@@ -413,18 +557,16 @@ def create_app(data_dir: Path | None = None, *, access: LocalAccess | None = Non
         return video.cancel(job_id)
 
     @app.get("/api/photos/{photo_id}/playback")
-    def playback_file(photo_id: int):
-        return FileResponse(video.file(photo_id), media_type="video/mp4")
+    def playback_file(photo_id: int, quality: PlaybackQuality = "720p"):
+        return FileResponse(video.file(photo_id, quality), media_type="video/mp4")
 
     @app.post("/api/libraries/{library_id}/rescan")
     def rescan(library_id: int):
-        idle()
-        with library.connect() as db:
-            if not db.execute("SELECT 1 FROM libraries WHERE id=? AND removed=0", (library_id,)).fetchone():
-                raise ValueError("Library not found.")
-        return jobs.submit(
-            "Rescanning library", lambda progress, cancelled: library.scan(library_id, progress, cancelled)
-        )
+        with jobs.while_idle():
+            with library.connect() as db:
+                if not db.execute("SELECT 1 FROM libraries WHERE id=? AND removed=0", (library_id,)).fetchone():
+                    raise ValueError("Library not found.")
+            return restore_scan(library_id)
 
     @app.post("/api/demo")
     def demo():
@@ -440,19 +582,107 @@ def create_app(data_dir: Path | None = None, *, access: LocalAccess | None = Non
 
     @app.get("/api/job")
     def job():
-        return {"job": jobs.snapshot()}
+        current = jobs.snapshot()
+        if current and current.get("result"):
+            recovery = current["result"].pop("jpeg_recovery", None)
+            current["result"].pop("jpeg_repair", None)
+            if recovery:
+                current["result"]["recoverable_jpegs"] = len(recovery["files"])
+        return {"job": current}
+
+    def completed_recovery(job_id):
+        current = jobs.snapshot()
+        if not current or current["id"] != job_id or current["state"] != "complete":
+            raise ValueError("Open the latest completed scan or match review.")
+        result = current.get("result") or {}
+        recovery = result.get("jpeg_recovery")
+        if not recovery or not recovery["files"]:
+            raise ValueError("This scan found no JPEGs eligible for recovery.")
+        return result, recovery
+
+    @app.post("/api/recovery/jpeg/review")
+    def start_recovery_review(body: RecoveryScan):
+        with jobs.while_idle():
+            _, recovery = completed_recovery(body.scan_id)
+            return jobs.submit("Reviewing larger copies", lambda progress, cancelled:
+                               review_recovery_matches(library, recovery, progress, cancelled))
+
+    @app.get("/api/recovery/jpeg/review/{job_id}/preview/{index}")
+    def damaged_recovery_preview(job_id: str, index: int):
+        result, recovery = completed_recovery(job_id)
+        candidate = next((item for item in result.get("review_candidates", []) if item["index"] == index), None)
+        if candidate is None:
+            raise HTTPException(404, "This comparison is unavailable.")
+        return Response(recovery_preview(library, recovery, candidate), media_type="image/jpeg")
+
+    @app.post("/api/recovery/jpeg")
+    def recover_jpeg_copies(body: RecoveryRequest):
+        with jobs.while_idle():
+            result, recovery = completed_recovery(body.scan_id)
+            if body.prefer_larger and "review_candidates" not in result:
+                raise ValueError("Review the larger matches before saving copies.")
+            candidates = {item["index"]: item for item in result.get("review_candidates", [])}
+            if body.approved_matches and (not body.prefer_larger or not set(body.approved_matches) <= candidates.keys()):
+                raise ValueError("An approved match is no longer in this review.")
+            approved = {index: candidates[index] for index in body.approved_matches}
+            root = ApprovedOutput.inspect(library.recovery_output_folder(body.destination))
+            return jobs.submit("Recovering JPEG copies", lambda progress, cancelled: recover_jpegs(
+                library, recovery, root, progress, cancelled, enhance=body.enhance,
+                approved=approved, trim_edge=body.trim_edge,
+            ))
 
     @app.post("/api/job/cancel")
-    def cancel():
-        jobs.stop.set()
+    def cancel(body: JobAction | None = None):
+        jobs.cancel(body.job_id if body else None)
         return {"ok": True}
+
+    @app.post("/api/job/pause")
+    def pause(body: JobAction):
+        jobs.pause(body.job_id)
+        return {"ok": True}
+
+    @app.post("/api/job/resume")
+    def resume(body: JobAction):
+        return jobs.resume(body.job_id)
+
+    def completed_repair(job_id):
+        current = jobs.snapshot()
+        if current and current["id"] == job_id and current["state"] == "complete":
+            repair = (current.get("result") or {}).get("jpeg_repair")
+            if repair:
+                return repair
+        raise ValueError("Open a new repair review for this photo.")
+
+    @app.post("/api/photos/{photo_id}/repair")
+    def inspect_photo_repair(photo_id: int):
+        with jobs.while_idle():
+            repairable_photo(library, photo_id)
+            return jobs.submit("Inspecting JPEG for repair", lambda progress, cancelled:
+                               review_photo_repair(library, photo_id, progress, cancelled))
+
+    @app.get("/api/recovery/repair/{job_id}/preview")
+    def repaired_crop_preview(job_id: str):
+        preview = completed_repair(job_id)["preview"]
+        if not preview:
+            raise HTTPException(404, "No crop is available for this photo.")
+        return Response(base64.b64decode(preview, validate=True), media_type="image/jpeg")
+
+    @app.post("/api/recovery/repair/{job_id}")
+    def save_repair(job_id: str, body: RepairRequest):
+        with jobs.while_idle():
+            repair = completed_repair(job_id)
+            if not repair[body.choice]:
+                raise ValueError("This repair option is unavailable.")
+            root = ApprovedOutput.inspect(library.recovery_output_folder(body.destination))
+            return jobs.submit("Repairing JPEG copy", lambda progress, cancelled:
+                               save_photo_repair(library, repair, body.choice, root, progress, cancelled))
 
     @app.post("/api/shutdown")
     def shutdown():
         callback = getattr(app.state, "shutdown", None)
         if callback is None:
             raise ValueError("Stop the server from its launcher or terminal.")
-        jobs.stop.set()
+        jobs.interrupt()
         callback()
         return {"ok": True}
 
@@ -515,19 +745,22 @@ def create_app(data_dir: Path | None = None, *, access: LocalAccess | None = Non
         idle()
         if not categories.ready():
             raise ValueError("Download the category model first.")
-        return jobs.submit(
-            "Detecting image categories",
-            lambda progress, cancelled: categories.analyze(body.filters.model_dump(), progress, cancelled),
-        )
+        return jobs.submit_resumable("categories", "Detecting image categories", body.filters.model_dump())
 
     @app.post("/api/categories/assign")
     def assign_categories(body: CategoryAssignment):
         idle()
         return library.assign_kind(body.ids, body.kind)
 
+    @app.post("/api/people/queue")
+    def people_queue(body: PeopleAnalysis):
+        return people.queue(body.model_dump())
+
     @app.post("/api/people/analyze")
-    def analyze():
-        return jobs.submit("Finding familiar faces", people.analyze)
+    def analyze_people(body: PeopleAnalysis | None = None):
+        if not people.ready():
+            raise ValueError("Download the people models first.")
+        return jobs.submit_resumable("people", "Finding familiar faces", (body or PeopleAnalysis()).model_dump())
 
     @app.get("/api/people/{person_id}/faces")
     def person_faces(person_id: int):

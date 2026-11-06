@@ -8,6 +8,8 @@ A dark forest navigation rail sits beside a light gallery. It separates source f
 
 The redesign used [Antislop](https://antislop.ai.id/) and [Style UI](https://style.ai.id/) as references for hierarchy, contrast and restrained decoration. The application does not depend on either site or bundle their interface code.
 
+The startup screen reuses Framekeep's logo. The four corners expand, rotate twice as a frame and return to their original position. The picture stays still. On fast starts the app shows one short cycle before opening the library. Reduce Motion removes that wait and shows the static logo. The loading and card feedback draw on [Bencho's loading state](https://bencho.dev/blocks/loading-state) and [album shelf](https://bencho.dev/blocks/album-shelf).
+
 ## Foundations
 
 | Role | Value |
@@ -29,6 +31,8 @@ The readable stylesheet is `framekeep/static/workspace.css`. Existing specialize
 ## Gallery behavior
 
 - Comfortable and compact grids share the same files, filters and selection. The preference is stored in browser-local storage; changing density does not refresh images or clear selection. The desktop's private WebView profile starts a fresh preference when the window is relaunched.
+- A thin line below the header marks an in-progress gallery request. Active filters appear below the search controls and can be removed individually.
+- Photo cards hold their size while a preview loads. The preview fades in when decoded, and an unavailable preview leaves the photo accessible from the card.
 - Album date filters are grouped in an accessible disclosure and expand when a date is active. Opening an album returns to the page heading.
 - Selected cards have an explicit checkbox and outline. A bottom toolbar provides Copy, Organize, Remove and Clear actions. It uses the existing verified copy and recoverable removal paths.
 - Ctrl/Shift clicks and Ctrl+A, Ctrl+C and Delete retain their existing behavior. Removal always requires confirmation and preserves original files.

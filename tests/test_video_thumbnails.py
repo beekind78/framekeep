@@ -39,7 +39,7 @@ def jpeg():
 def test_authenticated_video_thumbnail_cache_and_source_changes(library, monkeypatch):
     library, source, movie = library
     calls = []
-    monkeypatch.setattr(video_module.shutil, "which", lambda _: "ffmpeg")
+    monkeypatch.setattr(video_module, "ffmpeg_executable", lambda: "ffmpeg")
     monkeypatch.setattr(video_module, "process_video_thumbnail", lambda *args: calls.append(args) or jpeg())
     original = file_hash(source / "movie.HEIC")
     app = create_app(library.data)
@@ -55,7 +55,7 @@ def test_authenticated_video_thumbnail_cache_and_source_changes(library, monkeyp
         assert response.headers["cache-control"] == "no-store"
         assert "img-src 'self' blob:" in response.headers["content-security-policy"]
         assert client.get(path + "?token=" + token).status_code == 401
-        monkeypatch.setattr(video_module.shutil, "which", lambda _: None)
+        monkeypatch.setattr(video_module, "ffmpeg_executable", lambda: None)
         assert client.get(path, headers=headers).content == response.content  # Cached poster works offline.
         assert len(calls) == 1
         assert file_hash(source / "movie.HEIC") == original
@@ -67,7 +67,7 @@ def test_authenticated_video_thumbnail_cache_and_source_changes(library, monkeyp
 def test_concurrent_reads_share_one_generated_thumbnail(library, monkeypatch):
     library, _, movie = library
     video, calls = Video(library), []
-    monkeypatch.setattr(video_module.shutil, "which", lambda _: "ffmpeg")
+    monkeypatch.setattr(video_module, "ffmpeg_executable", lambda: "ffmpeg")
     monkeypatch.setattr(video_module, "process_video_thumbnail", lambda *args: calls.append(args) or jpeg())
     try:
         with ThreadPoolExecutor(max_workers=4) as pool:
@@ -98,10 +98,10 @@ def test_missing_decoder_invalid_output_and_managed_cache_budget(library, monkey
     library, _, movie = library
     video = Video(library)
     try:
-        monkeypatch.setattr(video_module.shutil, "which", lambda _: None)
+        monkeypatch.setattr(video_module, "ffmpeg_executable", lambda: None)
         with pytest.raises(ValueError, match="Install FFmpeg"):
             video.thumbnail(movie["id"])
-        monkeypatch.setattr(video_module.shutil, "which", lambda _: "ffmpeg")
+        monkeypatch.setattr(video_module, "ffmpeg_executable", lambda: "ffmpeg")
         monkeypatch.setattr(video_module, "process_video_thumbnail", lambda *args: b"invalid")
         with pytest.raises(ValueError, match="not a JPEG"):
             video.thumbnail(movie["id"])

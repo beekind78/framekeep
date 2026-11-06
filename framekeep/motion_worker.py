@@ -1,7 +1,6 @@
 """Bounded short-motion conversion. Only the trusted app invokes this worker."""
 
 import base64
-import hashlib
 import json
 import os
 import subprocess
@@ -13,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from framekeep.image_worker import set_resource_limits
 from framekeep.source_files import open_source
 from framekeep.video_metadata import read_video_metadata
+from framekeep.video_policy import stage_video
 
 MAX_INPUT = 128 * 1024 * 1024
 MAX_PREVIEW = 8 * 1024 * 1024
@@ -27,15 +27,11 @@ def convert(request):
     with tempfile.TemporaryDirectory(prefix="framekeep-motion-") as work:
         temporary = Path(work)
         source, target = temporary / "input.mov", temporary / "preview.mp4"
-        digest = hashlib.sha256()
         with open_source(path, root) as stream, source.open("xb") as output:
-            if not 0 < os.fstat(stream.fileno()).st_size <= MAX_INPUT:
+            size = os.fstat(stream.fileno()).st_size
+            if not 0 < size <= MAX_INPUT:
                 raise ValueError("Live Photo motion exceeds the 128 MiB preview limit.")
-            while block := stream.read(1024 * 1024):
-                digest.update(block)
-                output.write(block)
-        if digest.hexdigest() != request["sha256"]:
-            raise ValueError("Motion contents changed since indexing. Rescan this source.")
+            stage_video(stream, output, size, request["sha256"])
         command = [
             request["ffmpeg"], "-nostdin", "-hide_banner", "-loglevel", "error",
             "-protocol_whitelist", "file", "-f", "mov", "-enable_drefs", "0", "-use_absolute_path", "0",

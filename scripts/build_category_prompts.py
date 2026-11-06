@@ -1,4 +1,4 @@
-"""Rebuild generic CLIP label vectors, without reading any user images.
+"""Rebuild generic SigLIP 2 label vectors, without reading any user images.
 
 Install requirements-model-build.txt and pass the pinned text-model/tokenizer
 directory with --assets. The running app needs only the vision model.
@@ -15,33 +15,39 @@ from tokenizers import Tokenizer
 
 PROMPTS = {
     "Photos": [
-        "a photograph",
-        "a camera photograph",
-        "a photograph of real people",
-        "a photograph of an animal",
-        "a photograph of real world scenery",
-        "a photograph of food or everyday objects",
+        "this is a camera photograph of a real scene.",
+        "this is a candid mobile phone photo of people or a family gathering.",
+        "this is a photograph of real scenery, trees, or buildings.",
+        "this is a close-up photo of a pet, a meal, or an everyday object.",
+        "this is a photograph taken indoors under natural lighting.",
+        "this is an unedited travel photo taken outdoors with a phone camera.",
+        "this is a camera photo of a printed document or product on a table.",
+        "this is a photograph of a real place with photographic texture and lighting.",
     ],
     "Screenshots": [
-        "a screenshot of a smartphone screen showing an app interface",
-        "a screenshot of a computer desktop or an application window",
-        "a screenshot of a website with text, menus and buttons",
-        "a screenshot of a chat conversation or a social media app",
-        "a screenshot showing a phone status bar and navigation controls",
-        "a screenshot of a video game with its user interface",
+        "this is a screenshot of a smartphone app with a status bar and navigation buttons.",
+        "this is a screenshot of a messaging conversation with chat bubbles and timestamps.",
+        "this is a screenshot of a desktop application window or computer settings.",
+        "this is a screenshot of a website with menus, buttons, and text.",
+        "this is a screenshot of a social media feed containing photos or drawings.",
+        "this is a screenshot of a mobile map, menu, ticket, or order screen.",
+        "this is a screenshot of a video game with an on-screen interface.",
+        "this is a screen capture showing a photo or artwork inside an app interface.",
     ],
     "Illustrations": [
-        "a digital illustration or digital artwork",
-        "a cartoon, a comic or an anime drawing",
-        "a painting, a sketch or a hand drawn picture",
-        "an illustrated poster or a graphic design",
-        "a drawing of a character or an illustrated scene",
-        "a stylized illustration of a landscape",
+        "this is a digital illustration of a character or scene.",
+        "this is an anime drawing or cartoon character with clean outlines.",
+        "this is a comic panel with illustrated characters and speech balloons.",
+        "this is a small cartoon sticker or a simple drawing on a plain background.",
+        "this is a hand-drawn sketch, watercolor painting, or original artwork.",
+        "this is a stylized illustrated landscape or a digitally painted background.",
+        "this is a flat vector graphic or an illustrated poster.",
+        "this is a standalone cartoon or character illustration with no app interface.",
     ],
 }
 HASHES = {
-    "text_model_quantized.onnx": "73baab855d406190da9faa498cfedf65f15cf309f4cc7385b7b032e6d08e5c3a",
-    "tokenizer.json": "f7f3b7af117d467b58374797691a6438d3e6b9e9cef800dfd5dced7f697a90cd",
+    "text_model_quantized.onnx": "3a0603d3a00c05a80a6ded4743c16aaac7b1e62cdcc7e362e7ce418659b96400",
+    "tokenizer.json": "cb9140fae3ac5122c972d37adf83e1248471a38147ad76f8215c8872c6fd8322",
 }
 
 
@@ -54,8 +60,8 @@ def main():
         if hashlib.sha256((args.assets / name).read_bytes()).hexdigest() != checksum:
             raise ValueError(f"Unexpected build asset: {name}")
     tokenizer = Tokenizer.from_file(str(args.assets / "tokenizer.json"))
-    tokenizer.enable_padding(length=77, pad_id=49407, pad_token="<|endoftext|>")
-    tokenizer.enable_truncation(max_length=77)
+    tokenizer.enable_padding(length=64, pad_id=0, pad_token="<pad>")
+    tokenizer.enable_truncation(max_length=64)
     options = ort.SessionOptions()
     options.intra_op_num_threads = options.inter_op_num_threads = 1
     session = ort.InferenceSession(
@@ -66,12 +72,12 @@ def main():
     embeddings = []
     for prompts in PROMPTS.values():
         ids = np.asarray([row.ids for row in tokenizer.encode_batch(prompts)], dtype=np.int64)
-        features = session.run(["text_embeds"], {"input_ids": ids})[0]
+        features = session.run(["pooler_output"], {"input_ids": ids})[0]
         features /= np.linalg.norm(features, axis=1, keepdims=True)
         embeddings.append([[round(float(value), 8) for value in feature] for feature in features])
     result = {
-        "model": "Xenova/clip-vit-base-patch32",
-        "commit": "6b7c523703ae26e39be4b03774966f8571c7f523",
+        "model": "onnx-community/siglip2-base-patch16-224-ONNX",
+        "commit": "ba1f3b0843f24bc5417d38e19c37b287d719b2f4",
         "labels": list(PROMPTS),
         "prompts": PROMPTS,
         "embeddings": embeddings,

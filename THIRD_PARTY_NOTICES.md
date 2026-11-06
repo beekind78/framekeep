@@ -19,15 +19,19 @@ The original models are used without modification. Framekeep applies the detecti
 
 ## Optional visual category model
 
-Framekeep downloads the quantized CLIP ViT-B/32 vision model from [Xenova/clip-vit-base-patch32](https://huggingface.co/Xenova/clip-vit-base-patch32) at revision `6b7c523703ae26e39be4b03774966f8571c7f523`. The upstream model and conversion are labeled MIT; the original [OpenAI CLIP license](third_party/CLIP-MIT.txt) is included.
+Framekeep uses Google's [SigLIP 2 Base/16 at 224 px](https://huggingface.co/google/siglip2-base-patch16-224), licensed under [Apache 2.0](https://www.apache.org/licenses/LICENSE-2.0). It downloads the quantized [ONNX Community vision export](https://huggingface.co/onnx-community/siglip2-base-patch16-224-ONNX/tree/ba1f3b0843f24bc5417d38e19c37b287d719b2f4/onnx) at revision `ba1f3b0843f24bc5417d38e19c37b287d719b2f4`.
 
-The 89,117,001-byte model has SHA-256 `583fd1110a514667812fee7d684952aaf82a99b959760c8d7dca7e0ab9839299`. Weights stay in local application data, outside this repository. The bundled generic category text vectors are derived from the matching quantized text model and contain no user data. `scripts/build_category_prompts.py` records their prompts and verifies its build inputs. Its optional build dependencies are in `requirements-model-build.txt`.
+The 94,553,333-byte model has SHA-256 `5f2b401c1a4fc095702a5d45348e17ad46c4f87064085365b43c6e8eaa5c0070`. The weights stay in local application data. `scripts/build_category_prompts.py` verifies the text model and tokenizer used to generate the bundled category vectors from generic prompts. The vectors contain no user data. Build dependencies are in `requirements-model-build.txt`.
 
-Inference suggests organizational categories only. The model was not trained specifically for Framekeep; review uncertain or incorrect matches. See the [original model card](https://github.com/openai/CLIP/blob/main/model-card.md).
+The earlier CLIP ViT-B/32 category model is covered by the included [OpenAI CLIP license](third_party/CLIP-MIT.txt).
+
+## Optional recovery enlargement model
+
+Framekeep downloads the 240,078-byte ESPCN model from the [ONNX Model Zoo](https://huggingface.co/onnxmodelzoo/super-resolution-10/tree/395472c4b6b92f788357237983d83fd913cfe7e3), which lists the Apache 2.0 license. The model's SHA-256 is `85f36ff88cc504a24af5e0602148bc56a8aa09a58eca8c0da2756f3e8186035e`. The weights stay in local application data. ONNX Runtime performs 3× super-resolution on this PC.
 
 ## Optional FFmpeg executable
 
-Live Photo motion previews, ordinary in-app video playback and video frame thumbnails invoke a separately installed [FFmpeg](https://ffmpeg.org/) executable on PATH. Framekeep does not download or redistribute it. The installed build retains its own LGPL/GPL notices and enabled-codec licenses; see [FFmpeg legal information](https://ffmpeg.org/legal.html). Playback and video thumbnails are optional; pairing, image browsing and verified original copies do not require FFmpeg. Framekeep uses its existing WebView2 HTML video controls and does not bundle VLC or libVLC.
+Live Photo motion previews, ordinary in-app video playback and video frame thumbnails use a separately installed [FFmpeg](https://ffmpeg.org/). On Windows, Framekeep checks its tools folder first, then looks on PATH. The installed build retains its own licenses and notices. See the [FFmpeg legal information](https://ffmpeg.org/legal.html) for details.
 
 ## Demo artwork
 

@@ -89,6 +89,98 @@ def test_removed_sample_folder_can_be_restored_inside_app_data(catalog):
     assert library.photos({"library":sample_id}, None)["total"] == 1
 
 
+def test_forget_file_requires_a_removed_item_and_clears_both_live_photo_records(catalog):
+    library, library_id, source, _, photo = catalog
+    app = create_app(library.data)
+    originals = {path.name: file_hash(path) for path in source.iterdir()}
+    live = library.photos({"live_only": True}, None)["photos"][0]
+    live_ids = {live["id"], live["live_motion_id"]}
+    with TestClient(app, base_url="http://127.0.0.1") as client:
+        url = f"/api/removed/photos/{live['id']}"
+        assert client.delete(url).status_code == 401
+        token = client.post("/api/bootstrap", json={"ticket": app.state.access.ticket()}).json()["token"]
+        headers = {"X-Framekeep-Token": token}
+        assert client.delete(url, headers=headers).status_code == 400
+        assert client.delete(f"/api/photos/{live['id']}", headers=headers).json()["removed"] == 2
+        removed = client.get("/api/removed", headers=headers).json()["photos"][0]
+        url = f"/api/removed/photos/{removed['id']}"
+        assert client.delete(url, headers={**headers, "Origin": "https://outside.example"}).status_code == 403
+        assert client.delete(url, headers=headers).json() == {"forgotten": 2, "skipped_previews": 0}
+        assert client.get("/api/removed", headers=headers).json()["total"] == 0
+        assert client.post(f"/api/photos/{removed['id']}/restore", headers=headers).status_code == 400
+        assert client.delete(url, headers=headers).status_code == 400
+
+    assert not (library.thumbs / f"{live['id']}.jpg").exists()
+    assert library.photo(photo["id"])["tags"] == "keep this tag"
+    with library.connect() as db:
+        assert {row[0] for row in db.execute("SELECT id FROM photos")} == {photo["id"]}
+        assert not live_ids.intersection(row[0] for row in db.execute("SELECT photo_id FROM live_photo_metadata"))
+    library.scan(library_id, lambda *args: None, lambda: False)
+    reimported = library.photos({"live_only": True}, None)["photos"][0]
+    assert live_ids.isdisjoint({reimported["id"], reimported["live_motion_id"]})
+    assert originals == {path.name: file_hash(path) for path in source.iterdir()}
+
+
+def test_forget_folder_erases_its_metadata_and_previews_but_preserves_other_sources(catalog):
+    library, library_id, source, _, photo = catalog
+    other = source.parent / "keep"
+    other.mkdir()
+    Image.new("RGB", (20, 20), "red").save(other / "keep.jpg")
+    other_id = library.add(str(other))
+    library.scan(other_id, lambda *args: None, lambda: False)
+    retained = library.photos({"library": other_id}, None)["photos"][0]
+    app = create_app(library.data)
+    with library.connect() as db:
+        only = db.execute("INSERT INTO persons(name) VALUES ('Only in removed folder')").lastrowid
+        shared = db.execute("INSERT INTO persons(name) VALUES ('In both folders')").lastrowid
+        for image, person in ((photo, only), (photo, shared), (retained, shared)):
+            face = db.execute(
+                "INSERT INTO faces(photo_id,person_id,embedding) VALUES (?,?,?)", (image["id"], person, "[]")
+            ).lastrowid
+            (app.state.people.faces / f"{face}.jpg").write_bytes(b"test face preview")
+    originals = {path: file_hash(path) for path in (*source.iterdir(), *other.iterdir())}
+    with TestClient(app, base_url="http://127.0.0.1") as client:
+        token = client.post("/api/bootstrap", json={"ticket": app.state.access.ticket()}).json()["token"]
+        headers = {"X-Framekeep-Token": token}
+        url = f"/api/removed/libraries/{library_id}"
+        assert client.delete(url, headers=headers).status_code == 400
+        assert client.delete(f"/api/libraries/{library_id}", headers=headers).status_code == 200
+        gate = threading.Event()
+        app.state.jobs.submit("held task", lambda *args: gate.wait(3))
+        try:
+            assert client.delete(url, headers=headers).status_code == 400
+            assert client.get("/api/removed", headers=headers).json()["sources"][0]["id"] == library_id
+        finally:
+            gate.set()
+        for _ in range(100):
+            if not app.state.jobs.busy():
+                break
+            time.sleep(.01)
+        assert client.delete(url, headers=headers).json() == {"forgotten": 3, "skipped_previews": 0}
+        assert not client.get("/api/removed", headers=headers).json()["sources"]
+        assert client.post(f"/api/libraries/{library_id}/restore", headers=headers).status_code == 400
+
+    assert {path.stem for path in library.thumbs.glob("*.jpg")} == {str(retained["id"])}
+    assert {path.stem for path in app.state.people.faces.glob("*.jpg")} == {str(face)}
+    assert [person["id"] for person in library.summary()["people"]] == [shared]
+    with library.connect() as db:
+        assert not db.execute("SELECT 1 FROM libraries WHERE id=?", (library_id,)).fetchone()
+        assert not db.execute("SELECT 1 FROM photos WHERE library_id=?", (library_id,)).fetchone()
+        assert [row[0] for row in db.execute("SELECT id FROM persons")] == [shared]
+
+    library.remove_library(other_id)
+    library.forget_removed(other_id, source=True)
+    reopened = Library(library.data)
+    new_id = reopened.add(str(source))
+    assert new_id > other_id
+    reopened.scan(new_id, lambda *args: None, lambda: False)
+    reimported = next(row for row in reopened.photos({"library": new_id}, None)["photos"]
+                      if row["filename"] == photo["filename"])
+    assert reimported["id"] > retained["id"]
+    assert not reimported["tags"] and not reimported["favorite"] and reimported["kind_override"] is None
+    assert all(file_hash(path) == digest for path, digest in originals.items())
+
+
 def test_edited_copy_uses_full_resolution_orientation_crop_and_never_overwrites(catalog):
     library, _, source, output, photo = catalog
     before = file_hash(source / "ordinary.jpg")

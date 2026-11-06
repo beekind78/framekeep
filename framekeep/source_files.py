@@ -11,11 +11,57 @@ from pathlib import Path
 
 
 def is_link(path: Path) -> bool:
-    info = path.lstat()
+    return _is_link(path.lstat())
+
+
+def _is_link(info: os.stat_result) -> bool:
     return stat.S_ISLNK(info.st_mode) or bool(getattr(info, "st_file_attributes", 0) & 0x400)
 
 
+def file_identity(info: os.stat_result) -> tuple[int, ...]:
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
+
+
+def require_file_identity(stream, expected) -> None:
+    if expected is not None and file_identity(os.fstat(stream.fileno())) != tuple(expected):
+        raise ValueError("File changed during indexing; rescan to retry.")
+
+
+def source_entries(root: Path, onerror, skipped, cancelled):
+    from .output_files import pinned_directory
+
+    pending = [root]
+    while pending and not cancelled():
+        directory = pending.pop()
+        try:
+            with pinned_directory(directory) as (physical, fd), os.scandir(
+                physical if sys.platform == "win32" else fd
+            ) as entries:
+                for entry in entries:
+                    if cancelled():
+                        return
+                    try:
+                        info = entry.stat(follow_symlinks=False)
+                    except OSError as error:
+                        onerror(str(error))
+                        continue
+                    if _is_link(info):
+                        skipped(f"Skipped linked file or folder: {entry.name}")
+                    elif stat.S_ISDIR(info.st_mode):
+                        pending.append(physical / entry.name)
+                    elif stat.S_ISREG(info.st_mode):
+                        yield physical / entry.name, info
+                    else:
+                        skipped(f"Skipped nonregular file: {entry.name}")
+        except (OSError, ValueError) as error:
+            if directory == root:
+                raise
+            onerror(str(error))
+
+
 def source_path(path: Path, root: Path) -> Path:
+    if is_link(root):
+        raise ValueError("The registered source has become a link or reparse point.")
     root = root.resolve(strict=True)
     absolute = path.absolute()
     try:
@@ -68,8 +114,8 @@ def _opened_path(stream, fallback: Path) -> Path:
 
 @contextmanager
 def open_source(path: Path, root: Path):
-    canonical_root = root.resolve(strict=True)
     resolved = source_path(path, root)
+    canonical_root = root.absolute()
     if sys.platform == "win32":
         import msvcrt
         from ctypes import wintypes
@@ -96,7 +142,9 @@ def open_source(path: Path, root: Path):
             kernel.CloseHandle(handle)
             raise
     else:
-        descriptor = os.open(resolved, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        if not stat.S_ISREG(resolved.lstat().st_mode):
+            raise ValueError("Only regular, nonlinked photo files are processed.")
+        descriptor = os.open(resolved, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
     with os.fdopen(descriptor, "rb") as stream:
         info = os.fstat(stream.fileno())
         if not stat.S_ISREG(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:

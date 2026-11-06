@@ -25,7 +25,7 @@ SQLite uses WAL mode with one connection per operation. Scans compare file size 
 
 ### Category detection and visual matches
 
-Camera make/model metadata, explicit screenshot filenames and animation metadata take precedence over the optional CLIP model. Other images use visual classification, with uncertain predictions left in Needs review. A PNG extension or phone-sized dimensions alone do not make an image a screenshot.
+Camera metadata, screenshot filenames and animation metadata take precedence over SigLIP 2. The worker compares images with several prompts per category, using the whole frame to preserve clues such as menus and status bars. Uncertain predictions stay in Needs review.
 
 Analyze photos works within the current source, search and date filters. It preserves manual categories and skips video decoding. Visual fingerprints are generated in the bounded image worker and tied to the indexed SHA-256. Changed files invalidate their cached fingerprints.
 
@@ -71,7 +71,7 @@ A per-launch marker in the DPAPI-protected runtime record tracks ownership acros
 | `%USERPROFILE%\.framekeep\runtime` | Protected launcher and service credentials, temporary WebView profiles |
 | `%USERPROFILE%\.framekeep\logs` | Launcher logs |
 
-Set `FRAMEKEEP_DATA` before starting to change the data location. Runtime credentials use their own protected directory regardless of this setting.
+Set `FRAMEKEEP_DATA` before starting to change the data location. Use a private folder separate from `FRAMEKEEP_RUNTIME_DIR`. On Linux, Framekeep restricts its default application data and its app-owned parent to the current user. Custom data locations rely on the permissions you set.
 
 The profile directory is shared by ordinary Windows launches and launches from packaged desktop apps, avoiding AppData virtualization. Versions before 1.1.1 used AppData; keep that directory until existing library data has been migrated.
 
@@ -112,11 +112,23 @@ Original-image parsing, face extraction and movie metadata reads run in disposab
 | Memory | 1 GiB per process |
 | Concurrent image workers | One |
 
-Windows uses Job Objects; Linux uses resource limits. Processing fails closed if limits cannot be installed. Workers still run as the current account: this is resource isolation, not an OS privilege sandbox.
+Windows uses Job Objects. Linux uses resource limits. Processing fails closed if limits cannot be installed. Workers retain the account's filesystem and network permissions.
+
+The scanner classifies directory entries without following links and skips nonregular files. It checks that the worker and the scan hash refer to the same source file. Long hashes can be cancelled between chunks.
 
 ### Images
 
 Allowed decoders are JPEG, PNG, WebP, GIF, TIFF, BMP, HEIF and AVIF.
+
+The JPEG decoder also identifies MPO containers. Framekeep uses the first still for previews and edits, and retains the full container in verified copies.
+
+JPEG recovery is available from the latest completed scan. The worker verifies the source against the scan hash and tries lenient decoding only after the strict decoder confirms incomplete JPEG data. The recovered JPEG is written exclusively to a separate folder and verified after saving. Missing pixels can still appear as blank or damaged areas.
+
+Larger-match recovery checks rotated variants against up to 20,000 existing visual fingerprints. It verifies candidates on local thumbnails using the leading 80% of the damaged scan and requires at least four times the pixel area. The review job holds the proposed ID and SHA-256 for each match. Authenticated previews let the user approve the candidate before Framekeep copies its bytes. The save job rechecks the scan and match hashes. An optional trim removes a small neutral-gray tail from a recovered JPEG before enlargement.
+
+Recovery writes each run to a new subfolder inside the chosen destination and indexes that subfolder as a normal source. The report opens the recovered source directly in the gallery.
+
+Optional AI enlargement runs the pinned ESPCN model through ONNX Runtime on the CPU. Framekeep verifies the model's size and SHA-256 at download and before inference. It enlarges the recovered image by 3× per side when both sides are at most 512 pixels. The worker uses padded tiles for luminance and bicubic scaling for color channels.
 
 | Input limit | Value |
 | --- | --- |
@@ -148,20 +160,20 @@ Cloud placeholders need to be copied into an ordinary local backup folder before
 
 ## Media previews
 
-FFmpeg prepares local playback copies and frame thumbnails. Originals are never transcoded in place. Input SHA-256 checks run before decoding; FFmpeg accepts local MOV input with network protocols and external track references disabled.
+FFmpeg prepares local playback copies and frame thumbnails. On Windows, Framekeep first looks for an app-specific FFmpeg at `%USERPROFILE%\.framekeep\tools\ffmpeg\bin\ffmpeg.exe` and falls back to PATH. Input SHA-256 checks run before decoding. FFmpeg accepts local MOV input with network protocols and external track references disabled. Staging rejects excessive protection-system headers and legacy compressed QuickTime headers before FFmpeg starts.
 
 | Operation | Input limit | Output limit |
 | --- | --- | --- |
 | Live Photo motion | 128 MiB, 10-second source | 6 seconds, 960 pixels, 24 fps, 8 MiB |
 | Video thumbnail | 2 GiB | JPEG, 480 pixels per side, 512 KiB |
-| Ordinary video playback | 2 GiB, 30 minutes | 720p, 30 fps, 256 MiB |
+| Ordinary video playback | 2 GiB, 30 minutes | 720p or up to 4K, 30 fps, 256 MiB |
 
 | Operation | FFmpeg timeout | Worker wall time | CPU time per process |
 | --- | --- | --- | --- |
 | Live Photo motion or video thumbnail | 18 seconds | 25 seconds | 20 seconds |
 | Ordinary video playback | Within the worker deadline | 180 seconds | 150 seconds |
 
-Each preview process has a 1 GiB memory limit. On Windows, a kill-on-close Job Object allows the wrapper and one FFmpeg child. Both stop if the wrapper exits. Image workers retain their one-process limit. Native work shares the image-worker semaphore.
+Each preview process has a 1 GiB memory limit. On Windows, a kill-on-close Job Object allows the wrapper and one FFmpeg child. Both stop if the wrapper exits. Images, motion and thumbnail workers share a semaphore. Full playback uses its own single-worker queue.
 
 ### Video thumbnails
 
@@ -177,7 +189,7 @@ Live Photo playback is prepared after an authenticated Play request. H.264/AAC M
 
 Ordinary video conversion runs one job at a time. Closing the viewer or app cancels unfinished preparation and removes temporary files. Failed, oversized or incomplete output is rejected rather than presented as a truncated movie.
 
-Playback files are fetched through the authenticated API and played from temporary blob URLs. No session credential appears in a media URL. The playback cache targets 512 MiB, excluding a current conversion and files still held open by a response.
+Playback files are fetched through the authenticated API and played from temporary blob URLs. No session credential appears in a media URL. 720p and 4K use separate entries keyed by the original file hash. The playback cache targets 512 MiB across both modes, excluding a current conversion and files still held open by a response.
 
 HDR previews may look different. Original HDR resources remain unchanged. Subtitles, multiple audio tracks and professional video editing are not supported.
 
@@ -187,9 +199,9 @@ HDR previews may look different. Original HDR resources remain unchanged. Subtit
 
 Exports preview their layout, verify copied hashes and record results in a CSV manifest. Existing names get a numbered suffix instead of being overwritten.
 
-Direct output reuses existing folders and creates a uniquely named manifest. An optional separate run directory uses `manifest.csv`. Category output uses Photos, Screenshot, Illustration and Video; Needs review and Animated get folders when present. Only years and months containing copies are created.
+Direct output reuses existing folders and creates a uniquely named manifest. An optional separate run directory uses `manifest.csv`. Category output uses Photos, Screenshot, Illustration and Video. Downloads, Needs review and Animated get folders when present. Only years and months containing copies are created.
 
-A source changed after indexing is skipped with an error. Cancellation keeps completed copies and their manifest entries. Destination links and junctions are rejected; Windows directory handles prevent destination-folder swapping during copying.
+A source changed after indexing is skipped with an error. Cancellation keeps completed copies and their manifest entries. Framekeep checks the approved destination's identity before writing. Windows pins its directory handles. On Linux, creation and failure cleanup use the checked directory descriptor.
 
 Exports use the detected extension without renaming the source. JPEG content named `photo.MOV` becomes `photo.jpg` in the output. A QuickTime movie named `clip.HEIC` becomes `clip.mov`.
 
@@ -235,7 +247,7 @@ GitHub Actions runs the checks on Windows. Tests create temporary media; persona
 
 ### Optional integration checks
 
-Offline model tests use `FRAMEKEEP_CATEGORY_TEST_ASSETS`. Point it at a directory containing `runtime/clip-vit-base-patch32-int8.onnx` and permitted images under `validation/`. CI skips these tests instead of downloading weights.
+Offline model tests use `FRAMEKEEP_CATEGORY_TEST_ASSETS`. Point it at a directory containing `runtime/siglip2-base-patch16-224-int8.onnx` and permitted images under `validation/`. CI skips these tests instead of downloading weights.
 
 The local category smoke test distinguishes a camera image, an app screenshot and an original sample illustration. The face smoke test uses an OpenCV sample and a rotated variant: two detections and one suggested group. Neither check establishes general recognition accuracy; no sample face is committed.
 
