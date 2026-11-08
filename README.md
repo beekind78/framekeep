@@ -10,6 +10,8 @@ Phone backups often mix photos, screenshots, saved artwork and short video clips
 
 [Install](#run-on-windows) | [Browse and sort](#typical-workflow) | [Shortcuts](#selection-and-editing) | [Changelog](docs/CHANGELOG.md) | [Project case study](PORTFOLIO.md)
 
+For bugs or patches, see the [contributing guide](CONTRIBUTING.md). For vulnerabilities, see the [security policy](SECURITY.md).
+
 ## What you can do
 
 - Browse photos and videos by album, month or source folder.

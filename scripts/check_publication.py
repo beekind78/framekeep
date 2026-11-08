@@ -14,9 +14,16 @@ PUBLIC_ASSETS = {
 }
 ROOT_FILES = {
     ".gitignore", ".gitattributes", "README.md", "DESIGN.md", "PORTFOLIO.md", "LICENSE",
+    "SECURITY.md", "CONTRIBUTING.md", "CODE_OF_CONDUCT.md",
     "THIRD_PARTY_NOTICES.md", "pyproject.toml", "requirements.txt", "requirements-dev.txt",
     "requirements-lock.txt", "requirements-model-build.txt", "run.py", "desktop.py",
     "Setup Framekeep.cmd", "Start Framekeep.cmd", "Stop Framekeep.cmd", "Create Framekeep shortcuts.cmd",
+}
+GITHUB_FILES = {
+    ".github/workflows/ci.yml",
+    ".github/ISSUE_TEMPLATE/bug_report.md",
+    ".github/ISSUE_TEMPLATE/config.yml",
+    ".github/pull_request_template.md",
 }
 SECRETS = [
     re.compile(rb"gh[pousr]_[A-Za-z0-9]{30,}"),
@@ -35,7 +42,7 @@ def git(*args):
 
 def allowed(path):
     parts = PurePosixPath(path).parts
-    if path in ROOT_FILES or path in PUBLIC_ASSETS or path == ".github/workflows/ci.yml":
+    if path in ROOT_FILES or path in PUBLIC_ASSETS or path in GITHUB_FILES:
         return True
     if parts[0] == "framekeep":
         return path == "framekeep/category_prompts.json" or PurePosixPath(path).suffix in {
